@@ -44,19 +44,38 @@ def calculate_macd(series):
     return macd, signal
 
 def get_optimized_stocks(log_file, blacklist_file, original_stocks):
+    # 기본 지표(QQQ)로 시장 상황 판단
+    market_recovery = False
+    try:
+        market_df = yf.download("QQQ", period="50d", progress=False)
+        if isinstance(market_df.columns, pd.MultiIndex): market_df.columns = market_df.columns.get_level_values(0)
+        market_recovery = market_df['Close'].iloc[-1] > market_df['Close'].rolling(20).mean().iloc[-1]
+    except: pass
+
     if not os.path.exists(log_file): return original_stocks, []
+    
     try:
         df = pd.read_csv(log_file)
         if len(df) < 10: return original_stocks, []
+        
         perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
         count = df.groupby('종목').size()
-        # [진화 기준] 3회 이상 추천, 승률 50% 미만 즉시 퇴출
+        
+        # 기본 블랙리스트: 3회 이상 추천, 승률 50% 미만
         bad_stocks = perf[(perf < 0.5) & (count >= 3)].index.tolist()
+        
+        # [패자부활전] 지수가 회복세일 경우, 승률 45% 이상인 종목은 한시적 복귀
+        if market_recovery:
+            reborn_stocks = [s for s in bad_stocks if perf[s] >= 0.45]
+            bad_stocks = [s for s in bad_stocks if s not in reborn_stocks]
+            
         with open(blacklist_file, 'w') as f:
             json.dump(bad_stocks, f)
+            
         return [s for s in original_stocks if s not in bad_stocks], bad_stocks
     except:
         return original_stocks, []
+
 
 def run_analysis():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -125,6 +144,7 @@ def run_analysis():
 
 if __name__ == "__main__":
     run_analysis()
+
 
 
 
