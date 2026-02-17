@@ -44,7 +44,6 @@ def calculate_macd(series):
     return macd, signal
 
 def get_optimized_stocks(log_file, blacklist_file, original_stocks):
-    # 기본 지표(QQQ)로 시장 상황 판단
     market_recovery = False
     try:
         market_df = yf.download("QQQ", period="50d", progress=False)
@@ -53,29 +52,28 @@ def get_optimized_stocks(log_file, blacklist_file, original_stocks):
     except: pass
 
     if not os.path.exists(log_file): return original_stocks, []
-    
     try:
         df = pd.read_csv(log_file)
-        if len(df) < 10: return original_stocks, []
-        
         perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
         count = df.groupby('종목').size()
         
-        # 기본 블랙리스트: 3회 이상 추천, 승률 50% 미만
-        bad_stocks = perf[(perf < 0.5) & (count >= 10)].index.tolist()
+        # [수정] 최소 표본 10개 기준
+        evaluated_stocks = count[count >= 10].index.tolist()
         
-        # [패자부활전] 지수가 회복세일 경우, 승률 45% 이상인 종목은 한시적 복귀
-        if market_recovery:
-            reborn_stocks = [s for s in bad_stocks if perf[s] >= 0.30]
-            bad_stocks = [s for s in bad_stocks if s not in reborn_stocks]
-            
-        with open(blacklist_file, 'w') as f:
-            json.dump(bad_stocks, f)
-            
-        return [s for s in original_stocks if s not in bad_stocks], bad_stocks
-    except:
-        return original_stocks, []
+        # [수정] 승률 30% 미만은 무조건 퇴출
+        bad_stocks = [s for s in evaluated_stocks if perf[s] < 0.3]
+        
+        # [수정] 승률 30%~50% 사이인 종목들 처리
+        grey_zone = [s for s in evaluated_stocks if 0.3 <= perf[s] < 0.5]
+        
+        if not market_recovery:
+            bad_stocks.extend(grey_zone) # 시장 안 좋으면 회색지대도 퇴출
+        # else: 시장 좋으면 회색지대(30% 이상)는 복귀(bad_stocks에 안 넣음)
 
+        with open(blacklist_file, 'w') as f:
+            json.dump(list(set(bad_stocks)), f)
+        return [s for s in original_stocks if s not in bad_stocks], list(set(bad_stocks))
+    except: return original_stocks, []
 
 def run_analysis():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -96,22 +94,17 @@ def run_analysis():
             close = df['Close']
             curr_p, prev_p = float(close.iloc[-1]), float(close.iloc[-2])
             ma20 = close.rolling(20).mean()
-            curr_ma20 = float(ma20.iloc[-1])
             
             total_analyzed += 1
-            if curr_p < curr_ma20: down_count += 1
+            if curr_p < float(ma20.iloc[-1]): down_count += 1
             
-            ratio_temp = down_count / total_analyzed
-            y_target = 1.015 if ratio_temp > 0.6 else 1.025
+            y_target = 1.015 if (down_count/total_analyzed) > 0.6 else 1.025
             
-            # 자가 복기
-            prev_rsi = calculate_rsi(close).iloc[-2]
-            if prev_rsi < 35:
+            if calculate_rsi(close).iloc[-2] < 35:
                 is_hit_bool = float(df['High'].iloc[-1]) >= prev_p * y_target
-                review_reports.append(f"{s}:{'🎯익절' if is_hit_bool else '⏳보유'}")
+                review_reports.append(f"{s}:{'🎯' if is_hit_bool else '⏳'}")
                 trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": s, "목표가달성": "YES" if is_hit_bool else "NO"})
 
-            # 추천 로직
             rsi, mfi = float(calculate_rsi(close).iloc[-1]), float(calculate_mfi(df).iloc[-1])
             std = close.rolling(20).std()
             lower_b = float((ma20 - (std * 2)).iloc[-1])
@@ -131,9 +124,8 @@ def run_analysis():
         pd.DataFrame(trade_logs).to_csv('trade_log_nasdaq.csv', mode='a', index=False, header=not os.path.exists('trade_log_nasdaq.csv'), encoding='utf-8-sig')
 
     mode = "⚠️ 하락방어" if (down_count/total_analyzed if total_analyzed > 0 else 0) > 0.6 else "🚀 정상추세"
-    evo_msg = f" (🤖 AI 제외: {len(blacklisted)}개)" if blacklisted else ""
     report = [
-        f"🇺🇸 *NASDAQ EVOLVING AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode}{evo_msg}", "━━━━━━━━━━━━━━",
+        f"🇺🇸 *NASDAQ EVOLVING AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode} (🤖제외:{len(blacklisted)})", "━━━━━━━━━━━━━━",
         f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:10]) if review_reports else "- 분석 대상 없음"), "━━━━━━━━━━━━━━",
         f"🎯 **[SUPER BUY]**\n" + ("\n".join(super_buys[:5]) if super_buys else "- 해당 없음"),
         f"\n💎 **[STRONG BUY]**\n" + ("\n".join(strong_buys[:10]) if strong_buys else "- 해당 없음"),
