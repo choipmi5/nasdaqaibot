@@ -2,11 +2,8 @@ name: Nasdaq AI Bot Realtime
 
 on:
   schedule:
-    # 한국 시간 기준 (UTC +9)
-    # 낮: 오후 2시 (UTC 05:00) - 하루 한 번
-    # 밤(장 중): 밤 11시, 새벽 1시, 3시, 5시 (UTC 14, 16, 18, 20) - 주기적
     - cron: '0 5,14,16,18,20 * * 1-5'
-
+  workflow_dispatch:  # <--- 이 줄을 추가하면 버튼이 생깁니다!
 
 jobs:
   build:
