@@ -6,7 +6,7 @@ import json
 from datetime import datetime
 import pytz
 
-# 1. 환경 설정 및 종목 리스트
+# 환경 설정 (비밀값)
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
@@ -23,7 +23,7 @@ STOCKS = [
     "IVV", "VTI", "UPRO", "TMF", "ARM", "PLTR", "SNOW", "U", "COIN", "MSTR"
 ]
 
-# --- [지표 계산 함수] ---
+# --- [정밀 지표 함수] ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -44,7 +44,6 @@ def calculate_macd(series):
     signal = macd.ewm(span=9, adjust=False).mean()
     return macd, signal
 
-# --- [AI 진화 로직] ---
 def get_optimized_stocks(log_file, blacklist_file, original_stocks):
     market_recovery = False
     try:
@@ -52,18 +51,18 @@ def get_optimized_stocks(log_file, blacklist_file, original_stocks):
         if isinstance(market_df.columns, pd.MultiIndex): market_df.columns = market_df.columns.get_level_values(0)
         market_recovery = market_df['Close'].iloc[-1] > market_df['Close'].rolling(20).mean().iloc[-1]
     except: pass
-    if not os.path.exists(log_file): return original_stocks, []
+    if not os.path.exists(log_file): return original_stocks, market_recovery
     try:
         df = pd.read_csv(log_file)
         perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
         count = df.groupby('종목').size()
         eval_stocks = count[count >= 10].index.tolist()
         bad_stocks = [s for s in eval_stocks if perf[s] < 0.3]
-        grey_zone = [s for s in eval_stocks if 0.3 <= perf[s] < 0.5]
-        if not market_recovery: bad_stocks.extend(grey_zone)
+        if not market_recovery:
+            bad_stocks.extend([s for s in eval_stocks if 0.3 <= perf[s] < 0.5])
         with open(blacklist_file, 'w') as f: json.dump(list(set(bad_stocks)), f)
-        return [s for s in original_stocks if s not in bad_stocks], list(set(bad_stocks))
-    except: return original_stocks, []
+        return [s for s in original_stocks if s not in bad_stocks], market_recovery
+    except: return original_stocks, market_recovery
 
 # --- [메인 실행] ---
 def run_analysis():
@@ -71,7 +70,7 @@ def run_analysis():
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.now(kst)
 
-    optimized_stocks, blacklisted = get_optimized_stocks('trade_log_nasdaq.csv', 'blacklist_nasdaq.json', STOCKS)
+    optimized_stocks, market_recovery = get_optimized_stocks('trade_log_nasdaq.csv', 'blacklist_nasdaq.json', STOCKS)
     review_reports, super_buys, strong_buys, normal_buys, trade_logs, total_analyzed, down_count, temp_data = [], [], [], [], [], 0, 0, []
 
     for s in optimized_stocks:
@@ -85,54 +84,62 @@ def run_analysis():
             temp_data.append((s, df))
         except: continue
 
-    # 가변 타겟 (안정형 분할 익절)
     ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
-    if ratio < 0.3: t1, t2, mode_str = 1.025, 1.050, "🚀 불장(목표 2.5/5.0%)"
-    elif ratio < 0.6: t1, t2, mode_str = 1.015, 1.030, "📈 보통(목표 1.5/3.0%)"
-    else: t1, t2, mode_str = 1.007, 1.012, "⚠️ 하락(목표 0.7/1.2%)"
+    if ratio < 0.3: t1, t2, mode_str = 1.025, 1.050, "🚀 불장(2.5/5.0%)"
+    elif ratio < 0.6: t1, t2, mode_str = 1.015, 1.030, "📈 보통(1.5/3.0%)"
+    else: t1, t2, mode_str = 1.007, 1.012, "⚠️ 하락(0.7/1.2%)"
 
     for s, df in temp_data:
         try:
             close = df['Close']
             curr_p, prev_p = float(close.iloc[-1]), float(close.iloc[-2])
-            high_p = float(df['High'].iloc[-1])
+            high_p, vol = float(df['High'].iloc[-1]), df['Volume']
             
-            # 복기 로직
+            # 1. 분할 익절 복기
             if calculate_rsi(close).iloc[-2] < 35:
                 hit1, hit2 = high_p >= prev_p * t1, high_p >= prev_p * t2
                 status = "🎯" if hit2 else ("🌗" if hit1 else "⏳")
                 review_reports.append(f"{s}:{status}")
                 trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": s, "목표가달성": "YES" if hit2 else "NO"})
 
-            # 추천 로직
+            # 2. 정밀 추천 로직 (거래량 + 추세 + 지표)
             rsi, mfi = float(calculate_rsi(close).iloc[-1]), float(calculate_mfi(df).iloc[-1])
             std = close.rolling(20).std()
             lower_b = float((close.rolling(20).mean() - (std * 2)).iloc[-1])
             macd, signal = calculate_macd(close)
+            
+            avg_vol = vol.rolling(5).mean().iloc[-1]
+            is_vol_spike = vol.iloc[-1] > avg_vol * 1.2 # 거래량 20% 돌파
             is_oversold = rsi < 32 or curr_p <= lower_b
             is_money_in = mfi < 35
             is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
-            t_info = f"${curr_p * t1:.2f} / ${curr_p * t2:.2f}"
             
-            if is_oversold and is_money_in and is_turning: super_buys.append(f"🎯 *{s}* ({t_info})")
-            elif is_oversold and is_money_in: strong_buys.append(f"💎 *{s}* ({t_info})")
-            elif is_oversold: normal_buys.append(f"📈 *{s}* ({t_info})")
+            stop_loss = curr_p * 0.975 # -2.5% 손절가
+            t_info = f"${curr_p * t1:.2f} / ${curr_p * t2:.2f}\n(손절: ${stop_loss:.2f})"
+            
+            if is_oversold and is_money_in and is_turning and is_vol_spike and market_recovery:
+                super_buys.append(f"🎯 *{s}*\n{t_info}")
+            elif is_oversold and is_money_in and (is_vol_spike or market_recovery):
+                strong_buys.append(f"💎 *{s}*\n{t_info}")
+            elif is_oversold:
+                normal_buys.append(f"📈 *{s}*\n{t_info}")
         except: continue
 
     if trade_logs: pd.DataFrame(trade_logs).to_csv('trade_log_nasdaq.csv', mode='a', index=False, header=not os.path.exists('trade_log_nasdaq.csv'), encoding='utf-8-sig')
     
     report = [
-        f"🇺🇸 *NASDAQ STABLE AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
-        f"📊 **[전일 복기]** (🎯:익절 🌗:절반 ⏳:보유)\n" + (", ".join(review_reports[:10]) if review_reports else "- 대상 없음"), "━━━━━━━━━━━━━━",
-        f"🎯 **[SUPER BUY]**\n" + ("\n".join(super_buys[:5]) if super_buys else "- 없음"),
+        f"🇺🇸 *NASDAQ PRO AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
+        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:10]) if review_reports else "- 대상 없음"), "━━━━━━━━━━━━━━",
+        f"🎯 **[SUPER BUY]** (수급+시장완벽)\n" + ("\n".join(super_buys[:5]) if super_buys else "- 없음"),
         f"\n💎 **[STRONG BUY]**\n" + ("\n".join(strong_buys[:10]) if strong_buys else "- 없음"),
         f"\n🔍 **[NORMAL BUY]**\n" + ("\n".join(normal_buys[:15]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
-        f"✅ {total_analyzed}분석 (🤖제외:{len(blacklisted)})"
+        f"✅ {total_analyzed}분석 (시장점수: {int((1-ratio)*100)}점)"
     ]
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
     run_analysis()
+
 
 
 
