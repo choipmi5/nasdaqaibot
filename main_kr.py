@@ -9,23 +9,41 @@ import pytz
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# [국장 핵심 80~100개 종목 리스트]
-STOCKS_KR = [
-    "005930.KS", "000660.KS", "373220.KS", "005380.KS", "005490.KS", "000270.KS", "035420.KS", "006400.KS", "051910.KS", "068270.KS",
-    "035720.KS", "105560.KS", "012330.KS", "028260.KS", "055550.KS", "003550.KS", "032830.KS", "096770.KS", "033780.KS", "000810.KS",
-    "086790.KS", "009150.KS", "010130.KS", "018260.KS", "034220.KS", "011200.KS", "015760.KS", "001500.KS", "036570.KS", "009830.KS",
-    "247540.KQ", "091990.KQ", "066970.KQ", "293480.KQ", "025900.KQ", "253450.KQ", "035900.KQ", "067160.KQ", "036830.KQ", "039030.KQ",
-    "041510.KQ", "051900.KS", "010950.KS", "034730.KS", "000720.KS", "047050.KS", "011070.KS", "005935.KS", "030240.KS", "271560.KS"
-    # 필요시 티커 추가 가능
+# [국장 시총 상위 및 주요 100개 종목]
+# 이름과 티커를 튜플 형태로 묶어서 관리합니다.
+KR_STOCKS = [
+    ("삼성전자", "005930.KS"), ("SK하이닉스", "000660.KS"), ("LG엔솔", "373220.KS"), ("삼성바이오", "207940.KS"), ("현대차", "005380.KS"),
+    ("기아", "000270.KS"), ("셀트리온", "068270.KS"), ("KB금융", "105560.KS"), ("POSCO홀딩스", "005490.KS"), ("NAVER", "035420.KS"),
+    ("신한지주", "055550.KS"), ("삼성물산", "028260.KS"), ("현대모비스", "012330.KS"), ("LG화학", "051910.KS"), ("하나금융지주", "086790.KS"),
+    ("삼성생명", "032830.KS"), ("카카오", "035720.KS"), ("메리츠금융", "138040.KS"), ("삼성SDI", "006400.KS"), ("LG전자", "066570.KS"),
+    ("카카오뱅크", "323410.KS"), ("삼성화재", "000810.KS"), ("KT&G", "033780.KS"), ("한국전력", "015760.KS"), ("HMM", "011200.KS"),
+    ("SK이노베이션", "096770.KS"), ("삼성전기", "009150.KS"), ("크래프톤", "259960.KS"), ("두산에너빌리티", "034020.KS"), ("HD현대중공업", "329180.KS"),
+    ("에코프로비엠", "247540.KQ"), ("에코프로", "086520.KQ"), ("HLB", "028300.KQ"), ("알테오젠", "191150.KQ"), ("엔켐", "348370.KQ"),
+    ("리노공업", "058470.KQ"), ("레인보우로보틱스", "272410.KQ"), ("HPSP", "403870.KQ"), ("신성델타테크", "065350.KQ"), ("제주반도체", "080220.KQ"),
+    ("포스코퓨처엠", "003670.KS"), ("SK", "034730.KS"), ("S-Oil", "010950.KS"), ("고려아연", "010130.KS"), ("삼성에스디에스", "018260.KS"),
+    ("한화에어로스페이스", "012450.KS"), ("대한항공", "003490.KS"), ("KT", "030200.KS"), ("기업은행", "024110.KS"), ("HD현대", "267250.KS"),
+    ("LG", "003550.KS"), ("한국금융지주", "071050.KS"), ("아모레퍼시픽", "090430.KS"), ("코웨이", "021240.KS"), ("금양", "001570.KS"),
+    ("한온시스템", "018880.KS"), ("현대글로비스", "086280.KS"), ("삼성중공업", "010140.KS"), ("넷마블", "251270.KS"), ("카카오페이", "377300.KS"),
+    ("엔씨소프트", "036570.KS"), ("유한양행", "000100.KS"), ("한미사이언스", "008930.KS"), ("한미약품", "128940.KS"), ("오리온", "271560.KS"),
+    ("미래에셋증권", "006800.KS"), ("하이브", "352820.KS"), ("팬오션", "028670.KS"), ("두산밥캣", "241560.KS"), ("롯데케미칼", "011170.KS"),
+    ("현대건설", "000720.KS"), ("LG생활건강", "051900.KS"), ("SK바이오사이언스", "302440.KS"), ("호텔신라", "008770.KS"), ("GS", "078930.KS"),
+    ("포스코인터내셔널", "047050.KS"), ("에스디바이오센서", "137310.KS"), ("씨젠", "096530.KQ"), ("펄어비스", "263750.KQ"), ("셀트리온제약", "068760.KQ"),
+    ("휴젤", "145020.KQ"), ("클래시스", "214150.KQ"), ("에스엠", "041510.KQ"), ("JYP Ent.", "035900.KQ"), ("루닛", "328130.KQ"),
+    ("가온칩스", "399720.KQ"), ("오픈엣지테크놀로지", "394280.KQ"), ("소울브레인", "357780.KQ"), ("동진쎄미켐", "005290.KQ"), ("원익IPS", "030530.KQ"),
+    ("이오테크닉스", "039030.KQ"), ("솔브레인홀딩스", "036830.KQ"), ("파두", "440110.KQ"), ("위메이드", "112040.KQ"), ("컴투스", "078340.KQ"),
+    ("바이오니아", "064550.KQ"), ("STX", "011810.KS"), ("한화오션", "042660.KS"), ("LS", "006260.KS"), ("LS ELECTRIC", "010120.KS")
 ]
+
+# 티커를 넣으면 이름을 반환하는 딕셔너리 자동 생성
+NAME_MAP = {ticker: name for name, ticker in KR_STOCKS}
+STOCKS_KR = [ticker for name, ticker in KR_STOCKS]
 
 # --- [지표 계산 함수] ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    return 100 - (100 / (1 + (gain / loss)))
 
 def calculate_mfi(df, period=14):
     tp = (df['High'] + df['Low'] + df['Close']) / 3
@@ -56,20 +74,20 @@ def run_analysis():
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             
             close = df['Close']
-            curr_p = float(close.iloc[-1])
-            prev_p = float(close.iloc[-2])
+            curr_p, prev_p = float(close.iloc[-1]), float(close.iloc[-2])
             ma20 = close.rolling(20).mean()
             
             total_analyzed += 1
             if curr_p < float(ma20.iloc[-1]): down_count += 1
             
-            # --- [국장용 자가 복기] ---
+            # --- [복기] ---
             ratio_temp = down_count / total_analyzed
-            y_target = 1.012 if ratio_temp > 0.6 else 1.020 # 국장은 목표치를 살짝 낮춤
+            y_target = 1.012 if ratio_temp > 0.6 else 1.020
+            stock_name = NAME_MAP.get(s, s)
             
             if calculate_rsi(close).iloc[-2] < 35:
                 is_hit = "🎯익절" if float(df['High'].iloc[-1]) >= prev_p * y_target else "⏳보유"
-                review_reports.append(f"{s.split('.')[0]}:{is_hit}")
+                review_reports.append(f"{stock_name}:{is_hit}")
 
             # --- [지표 분석] ---
             rsi = float(calculate_rsi(close).iloc[-1])
@@ -81,29 +99,26 @@ def run_analysis():
             is_oversold = rsi < 32 or curr_p <= lower_b
             is_money_in = mfi < 35
             is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
-
-            # 국장은 변동성을 고려해 보수적 가격 제시 (단위: 원)
+            
             target_p = int(curr_p * (1.012 if ratio_temp > 0.6 else 1.020))
             
-            ticker_name = s.split('.')[0]
             if is_oversold and is_money_in and is_turning:
-                super_buys.append(f"🎯 *{ticker_name}* (목표: {target_p:,}원)")
+                super_buys.append(f"🎯 *{stock_name}* ({target_p:,}원)")
             elif is_oversold and is_money_in:
-                strong_buys.append(f"💎 *{ticker_name}* (목표: {target_p:,}원)")
+                strong_buys.append(f"💎 *{stock_name}* ({target_p:,}원)")
             elif is_oversold:
-                normal_buys.append(f"📈 *{ticker_name}* (목표: {target_p:,}원)")
+                normal_buys.append(f"📈 *{stock_name}* ({target_p:,}원)")
                 
         except: continue
 
-    ratio = down_count / total_analyzed if total_analyzed > 0 else 0
-    mode = "⚠️ 하락방어" if ratio > 0.6 else "🚀 정상추세"
+    mode = "⚠️ 하락방어" if (down_count/total_analyzed) > 0.6 else "🚀 정상추세"
     
     report = [
-        f"🇰🇷 *KOREA STOCK AI REPORT*",
+        f"🇰🇷 *KOREA STOCK AI REPORT (100+)*",
         f"📅 {now.strftime('%m-%d %H:%M')} (KST) | 📡 **{mode}**",
         f"━━━━━━━━━━━━━━",
-        f"📊 **[전일 국장 복기]**",
-        ", ".join(review_reports[:8]) if review_reports else "- 분석 대상 없음",
+        f"📊 **[전일 복기]**",
+        ", ".join(review_reports[:10]) if review_reports else "- 분석 대상 없음",
         f"━━━━━━━━━━━━━━",
         f"🎯 **[SUPER BUY]**",
         "\n".join(super_buys[:5]) if super_buys else "- 해당 없음",
@@ -112,7 +127,7 @@ def run_analysis():
         f"\n🔍 **[NORMAL BUY]**",
         "\n".join(normal_buys[:15]) if normal_buys else "- 해당 없음",
         f"━━━━━━━━━━━━━━",
-        f"✅ 국장 `{total_analyzed}`종목 정밀 분석 완료"
+        f"✅ 국장 `{total_analyzed}`종목 스캔 완료"
     ]
     
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
@@ -120,3 +135,4 @@ def run_analysis():
 
 if __name__ == "__main__":
     run_analysis()
+
