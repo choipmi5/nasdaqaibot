@@ -56,7 +56,6 @@ def calculate_macd(series):
     return macd, signal
 
 def get_optimized_stocks(log_file, blacklist_file, original_tickers):
-    # 코스피 지수로 시장 상황 판단
     market_recovery = False
     try:
         market_df = yf.download("^KS11", period="50d", progress=False)
@@ -65,30 +64,28 @@ def get_optimized_stocks(log_file, blacklist_file, original_tickers):
     except: pass
 
     if not os.path.exists(log_file): return original_tickers, []
-    
     try:
         df = pd.read_csv(log_file)
-        if len(df) < 10: return original_tickers, []
-        
         perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
         count = df.groupby('종목').size()
         
-        # 3회 추천 승률 50% 미만 컷
-        bad_names = perf[(perf < 0.5) & (count >= 10)].index.tolist()
+        # [수정] 표본 10개 이상만 평가
+        eval_names = count[count >= 10].index.tolist()
         
-        # [패자부활전] 코스피가 20일선 위에 있으면, 승률 45% 이상인 종목 복귀
-        if market_recovery:
-            reborn_names = [n for n in bad_names if perf[n] >= 0.30]
-            bad_names = [n for n in bad_names if n not in reborn_names]
-            
-        with open(blacklist_file, 'w') as f:
-            json.dump(bad_names, f)
-            
-        bad_tickers = [t for name, t in KR_STOCKS if name in bad_names]
-        return [t for t in original_tickers if t not in bad_tickers], bad_names
-    except:
-        return original_tickers, []
+        # [수정] 승률 30% 미만 무조건 제외
+        bad_names = [n for n in eval_names if perf[n] < 0.3]
+        
+        # [수정] 30~50% 구간
+        grey_zone = [n for n in eval_names if 0.3 <= perf[n] < 0.5]
+        
+        if not market_recovery:
+            bad_names.extend(grey_zone)
 
+        with open(blacklist_file, 'w') as f:
+            json.dump(list(set(bad_names)), f)
+        bad_tickers = [t for name, t in KR_STOCKS if name in bad_names]
+        return [t for t in original_tickers if t not in bad_tickers], list(set(bad_names))
+    except: return original_tickers, []
 
 def run_analysis():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
@@ -112,7 +109,7 @@ def run_analysis():
             
             if calculate_rsi(close).iloc[-2] < 35:
                 is_hit_bool = float(df['High'].iloc[-1]) >= prev_p * y_target
-                review_reports.append(f"{stock_name}:{'🎯익절' if is_hit_bool else '⏳보유'}")
+                review_reports.append(f"{stock_name}:{'🎯' if is_hit_bool else '⏳'}")
                 trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": stock_name, "목표가달성": "YES" if is_hit_bool else "NO"})
 
             rsi, mfi = float(calculate_rsi(close).iloc[-1]), float(calculate_mfi(df).iloc[-1])
@@ -133,9 +130,8 @@ def run_analysis():
         pd.DataFrame(trade_logs).to_csv('trade_log_kr.csv', mode='a', index=False, header=not os.path.exists('trade_log_kr.csv'), encoding='utf-8-sig')
 
     mode = "⚠️ 하락방어" if (down_count/total_analyzed if total_analyzed > 0 else 0) > 0.6 else "🚀 정상추세"
-    evo_msg = f" (🤖 AI 제외: {len(blacklisted)}개)" if blacklisted else ""
     report = [
-        f"🇰🇷 *KOREA EVOLVING AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode}{evo_msg}", "━━━━━━━━━━━━━━",
+        f"🇰🇷 *KOREA EVOLVING AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode} (🤖제외:{len(blacklisted)})", "━━━━━━━━━━━━━━",
         f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:10]) if review_reports else "- 분석 대상 없음"), "━━━━━━━━━━━━━━",
         f"🎯 **[SUPER BUY]**\n" + ("\n".join(super_buys[:5]) if super_buys else "- 해당 없음"),
         f"\n💎 **[STRONG BUY]**\n" + ("\n".join(strong_buys[:10]) if strong_buys else "- 해당 없음"),
