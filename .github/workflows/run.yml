@@ -2,20 +2,26 @@ name: Nasdaq AI Bot Realtime
 
 on:
   schedule:
+    # 한국 시간: 낮 14시, 밤 23시, 새벽 1시, 3시, 5시
     - cron: '0 5,14,16,18,20 * * 1-5'
-  workflow_dispatch:  # <--- 이 줄을 추가하면 버튼이 생깁니다!
+  workflow_dispatch: 
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
-        run: pip install yfinance pandas-ta requests pytz
+        run: |
+          python -m pip install --upgrade pip
+          pip install yfinance pandas-ta requests pytz pandas
+
       - name: Run AI Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
