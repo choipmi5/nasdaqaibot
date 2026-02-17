@@ -4,77 +4,61 @@ import pandas as pd
 import requests
 from datetime import datetime
 import pytz
-import warnings
 
-warnings.filterwarnings('ignore')
-
+# 1. 설정 및 Secrets 로드
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
-
 STOCKS = ["QQQ", "TQQQ", "SQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AMD", "SOXL"]
 
-# RSI를 직접 계산하는 함수 (외부 라이브러리 미사용)
-def calculate_rsi(data, window=14):
-    delta = data.diff()
-    up = delta.clip(lower=0)
-    down = -1 * delta.clip(upper=0)
-    ema_up = up.ewm(com=window-1, adjust=False).mean()
-    ema_down = down.ewm(com=window-1, adjust=False).mean()
-    rs = ema_up / ema_down
+# 2. RSI 직접 계산 함수 (에러 방지용)
+def get_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-def run_analysis():
+def run():
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.now(kst)
     
-    # 하락장 여부 판단
-    down_trend_count = 0
-    temp_results = []
+    buy_signals = []
+    down_count = 0
     
-    for ticker in STOCKS:
+    for s in STOCKS:
         try:
-            df = yf.download(ticker, period="40d", progress=False)
+            df = yf.download(s, period="40d", progress=False)
             if df.empty: continue
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             
             close = df['Close']
-            ma20 = close.rolling(window=20).mean()
-            rsi = calculate_rsi(close)
+            curr_p = float(close.iloc[-1])
+            ma20 = float(close.rolling(20).mean().iloc[-1])
+            rsi = float(get_rsi(close).iloc[-1])
             
-            curr_price = float(close.iloc[-1])
-            curr_ma20 = float(ma20.iloc[-1])
-            curr_rsi = float(rsi.iloc[-1])
-            
-            if curr_price < curr_ma20: down_trend_count += 1
-            if curr_rsi < 32:
-                temp_results.append((ticker, curr_rsi, curr_price))
+            if curr_p < ma20: down_count += 1
+            if rsi < 32:
+                buy_signals.append(f"📈 *{s}* (RSI: `{rsi:.1f}`)\n  └ 목표: `${curr_p * 1.01:.2f}`")
         except: continue
 
-    down_trend_ratio = (down_trend_count / len(STOCKS))
-    applied_profit = 1.01 if down_trend_ratio > 0.6 else 1.02
-    mode_text = "⚠️ 하락장 방어" if down_trend_ratio > 0.6 else "🚀 정상 추세"
-
-    report = [
-        f"🤖 *SELF-OPTIMIZING REPORT*",
-        f"📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)",
+    # 리포트 작성
+    ratio = down_count / len(STOCKS)
+    mode = "⚠️ 하락방어" if ratio > 0.6 else "🚀 정상추세"
+    
+    text = [
+        f"🤖 *AI REPORT*",
+        f"📅 {now.strftime('%m-%d %H:%M')} (KST)",
         f"━━━━━━━━━━━━━━",
-        f"📡 모드: {mode_text}",
-        f"📊 하락추세 비율: `{down_trend_ratio*100:.1f}%`",
-        f"🎯 목표 수익률: `+{(applied_profit-1)*100:.1f}%`",
+        f"📡 모드: {mode} ({ratio*100:.0f}%)",
         f"━━━━━━━━━━━━━━\n",
-        f"🔥 *[매수 추천]*"
+        f"🔥 *[추천]*"
     ]
+    text.extend(buy_signals if buy_signals else ["- 조건 만족 없음"])
     
-    if temp_results:
-        for t, r, p in temp_results:
-            report.append(f"📈 *{t}* (RSI: `{r:.1f}`)\n  └ 목표가: `${p * applied_profit:.2f}`")
-    else:
-        report.append("- 현재 조건 만족 종목 없음")
-    
-    message = "\n".join(report)
+    # 전송
+    msg = "\n".join(text)
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
+                  json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
-    run_analysis()
-
+    run()
