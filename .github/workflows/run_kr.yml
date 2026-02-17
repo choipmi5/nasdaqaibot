@@ -2,24 +2,38 @@ name: Korea Stock AI Bot
 
 on:
   schedule:
-    # 한국 시간 평일 오전 10시, 오후 1시, 오후 3시 40분 (UTC 기준 01, 04, 06:40)
+    # 한국 시간 기준 장중 및 마감 (UTC 기준)
     - cron: '0 1,4 * * 1-5'
     - cron: '40 6 * * 1-5'
-  workflow_dispatch: # 수동 실행 버튼
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
         run: pip install yfinance requests pytz pandas
+
       - name: Run AI Bot
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
         run: python main_kr.py
+
+      - name: Commit and Push Evolution Data
+        run: |
+          git config --global user.name "GitHub Action Bot"
+          git config --global user.email "actions@github.com"
+          git add trade_log_kr.csv blacklist_kr.json || echo "No files to add"
+          git commit -m "AI Self-Evolution: Update logs and blacklist [skip ci]" || echo "No changes to commit"
+          git push
