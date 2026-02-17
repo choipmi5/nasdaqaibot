@@ -1,0 +1,25 @@
+name: Korea Stock AI Bot
+
+on:
+  schedule:
+    # 한국 시간 평일 오전 10시, 오후 1시, 오후 3시 40분 (UTC 기준 01, 04, 06:40)
+    - cron: '0 1,4 * * 1-5'
+    - cron: '40 6 * * 1-5'
+  workflow_dispatch: # 수동 실행 버튼
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: pip install yfinance requests pytz pandas
+      - name: Run AI Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python main_kr.py
