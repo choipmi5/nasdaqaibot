@@ -1,13 +1,6 @@
 import os
-TELEGRAM_TOKEN = os.environ['TELEGRAM_TOKEN']
-CHAT_ID = os.environ['CHAT_ID']
-
-# 1. 라이브러리 설치 및 시간대 설정
-!pip install yfinance pandas_ta requests pytz --quiet
-
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 import requests
 from datetime import datetime
 import pytz
@@ -15,96 +8,73 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# --- [정보 입력] ---
-TELEGRAM_TOKEN = "8038442610:AAFIQ9iPM_794olGtsfpG2l9iGAcxQD6eYQ"
-CHAT_ID = "6165233712"
-STOCKS = ["QQQ", "TQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "SOXL", "AMD", "META", "AMZN", "NFLX", "GOOGL"] # 예시로 12개, 50개로 확장 가능
-# ------------------
+TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
+CHAT_ID = os.environ.get('CHAT_ID')
 
-def to_float(val):
-    if isinstance(val, (pd.Series, pd.DataFrame)): return float(val.iloc[0])
-    return float(val)
+STOCKS = ["QQQ", "TQQQ", "SQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AMD", "SOXL"]
+
+# RSI를 직접 계산하는 함수 (외부 라이브러리 미사용)
+def calculate_rsi(data, window=14):
+    delta = data.diff()
+    up = delta.clip(lower=0)
+    down = -1 * delta.clip(upper=0)
+    ema_up = up.ewm(com=window-1, adjust=False).mean()
+    ema_down = down.ewm(com=window-1, adjust=False).mean()
+    rs = ema_up / ema_down
+    return 100 - (100 / (1 + rs))
 
 def run_analysis():
-    print(f"🔄 AI 자기 최적화 분석 가동...")
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.now(kst)
-
-    # 1. 시장 심리 및 추세 파악
-    vix_df = yf.download("^VIX", period="5d", progress=False)
-    vix_val = to_float(vix_df['Close'].iloc[-1])
     
-    # 2. 전 종목 역배열 비율 계산 (Self-Optimization 핵심)
+    # 하락장 여부 판단
     down_trend_count = 0
-    total_analyzed = 0
+    temp_results = []
     
-    temp_data = {}
     for ticker in STOCKS:
         try:
             df = yf.download(ticker, period="40d", progress=False)
+            if df.empty: continue
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            df['MA20'] = ta.sma(df['Close'], length=20)
             
-            curr_price = to_float(df['Close'].iloc[-1])
-            ma20_val = to_float(df['MA20'].iloc[-1])
+            close = df['Close']
+            ma20 = close.rolling(window=20).mean()
+            rsi = calculate_rsi(close)
             
-            if curr_price < ma20_val: down_trend_count += 1
-            total_analyzed += 1
-            temp_data[ticker] = df # 데이터 재사용을 위해 저장
+            curr_price = float(close.iloc[-1])
+            curr_ma20 = float(ma20.iloc[-1])
+            curr_rsi = float(rsi.iloc[-1])
+            
+            if curr_price < curr_ma20: down_trend_count += 1
+            if curr_rsi < 32:
+                temp_results.append((ticker, curr_rsi, curr_price))
         except: continue
 
-    # 3. AI 전략 자동 수정 로직
-    down_trend_ratio = (down_trend_count / total_analyzed) if total_analyzed > 0 else 0
-    
-    # 기본 익절률 설정 (VIX 기준)
-    base_profit = 1.015 if vix_val < 25 else 1.025
-    
-    # [전략 수정] 역배열 종목이 60% 이상이면 '하락장 모드' 가동
-    if down_trend_ratio > 0.6:
-        applied_profit = base_profit - 0.005 # 익절 타겟 0.5% 하향 (보수적)
-        mode_text = "⚠️ 하락장 방어 모드 (보수적 타겟)"
-        filter_out_down_trend = True # 역배열 종목 추천 제외
-    else:
-        applied_profit = base_profit
-        mode_text = "🚀 정상 추세 모드 (공격적 타겟)"
-        filter_out_down_trend = False
+    down_trend_ratio = (down_trend_count / len(STOCKS))
+    applied_profit = 1.01 if down_trend_ratio > 0.6 else 1.02
+    mode_text = "⚠️ 하락장 방어" if down_trend_ratio > 0.6 else "🚀 정상 추세"
 
     report = [
-        f"━━━━━━━━━━━━━━",
         f"🤖 *SELF-OPTIMIZING REPORT*",
         f"📅 {now.strftime('%Y-%m-%d %H:%M')} (KST)",
         f"━━━━━━━━━━━━━━",
-        f"📡 *작동 모드:* {mode_text}",
-        f"📊 *하락추세 비율:* `{down_trend_ratio*100:.1f}%`",
-        f"🎯 *조정된 타겟:* `+{(applied_profit-1)*100:.1f}%`",
-        f"━━━━━━━━━━━━━━\n"
+        f"📡 모드: {mode_text}",
+        f"📊 하락추세 비율: `{down_trend_ratio*100:.1f}%`",
+        f"🎯 목표 수익률: `+{(applied_profit-1)*100:.1f}%`",
+        f"━━━━━━━━━━━━━━\n",
+        f"🔥 *[매수 추천]*"
     ]
     
-    buy_signals = []
+    if temp_results:
+        for t, r, p in temp_results:
+            report.append(f"📈 *{t}* (RSI: `{r:.1f}`)\n  └ 목표가: `${p * applied_profit:.2f}`")
+    else:
+        report.append("- 현재 조건 만족 종목 없음")
     
-    for ticker, df in temp_data.items():
-        try:
-            df['RSI'] = ta.rsi(df['Close'], length=14)
-            curr_price = to_float(df['Close'].iloc[-1])
-            curr_rsi = to_float(df['RSI'].iloc[-1])
-            ma20_val = to_float(df['MA20'].iloc[-1])
-            
-            # 매수 필터 적용
-            if curr_rsi < 32:
-                # 하락장 모드일 때 역배열 종목은 추천에서 아예 뺌
-                if filter_out_down_trend and curr_price < ma20_val:
-                    continue 
-                
-                buy_signals.append(f"📈 *{ticker}* (RSI: `{curr_rsi:.1f}`)\n  └ 목표가: `${curr_price * applied_profit:.2f}`")
-        except: continue
+    message = "\n".join(report)
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                  json={"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"})
 
-    report.append("🔥 *[최적화된 매수 추천]*")
-    report.extend(buy_signals if buy_signals else ["- 현재 조건 만족 종목 없음"])
-    report.append("\n━━━━━━━━━━━━━━")
+if __name__ == "__main__":
+    run_analysis()
 
-    # 텔레그램 전송
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
-    print(f"✅ {mode_text}로 분석 완료!")
-
-run_analysis()
