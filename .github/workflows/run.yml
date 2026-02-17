@@ -1,0 +1,26 @@
+name: Nasdaq AI Bot Realtime
+
+on:
+  schedule:
+    # 한국 시간 기준 (UTC +9)
+    # 낮: 오후 2시 (UTC 05:00) - 하루 한 번
+    # 밤(장 중): 밤 11시, 새벽 1시, 3시, 5시 (UTC 14, 16, 18, 20) - 주기적
+    - cron: '0 5,14,16,18,20 * * 1-5'
+
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: pip install yfinance pandas_ta requests pytz
+      - name: Run AI Bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python main.py
