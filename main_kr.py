@@ -56,18 +56,39 @@ def calculate_macd(series):
     return macd, signal
 
 def get_optimized_stocks(log_file, blacklist_file, original_tickers):
+    # 코스피 지수로 시장 상황 판단
+    market_recovery = False
+    try:
+        market_df = yf.download("^KS11", period="50d", progress=False)
+        if isinstance(market_df.columns, pd.MultiIndex): market_df.columns = market_df.columns.get_level_values(0)
+        market_recovery = market_df['Close'].iloc[-1] > market_df['Close'].rolling(20).mean().iloc[-1]
+    except: pass
+
     if not os.path.exists(log_file): return original_tickers, []
+    
     try:
         df = pd.read_csv(log_file)
         if len(df) < 10: return original_tickers, []
+        
         perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
         count = df.groupby('종목').size()
-        bad_names = perf[(perf < 0.5) & (count >= 3)].index.tolist()
+        
+        # 3회 추천 승률 50% 미만 컷
+        bad_names = perf[(perf < 0.5) & (count >= 10)].index.tolist()
+        
+        # [패자부활전] 코스피가 20일선 위에 있으면, 승률 45% 이상인 종목 복귀
+        if market_recovery:
+            reborn_names = [n for n in bad_names if perf[n] >= 0.30]
+            bad_names = [n for n in bad_names if n not in reborn_names]
+            
         with open(blacklist_file, 'w') as f:
             json.dump(bad_names, f)
+            
         bad_tickers = [t for name, t in KR_STOCKS if name in bad_names]
         return [t for t in original_tickers if t not in bad_tickers], bad_names
-    except: return original_tickers, []
+    except:
+        return original_tickers, []
+
 
 def run_analysis():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
