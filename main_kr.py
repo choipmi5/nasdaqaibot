@@ -2,15 +2,13 @@ import os
 import yfinance as yf
 import pandas as pd
 import requests
+import json
 from datetime import datetime
 import pytz
 
-# 1. 환경 설정
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# [국장 시총 상위 및 주요 100개 종목]
-# 이름과 티커를 튜플 형태로 묶어서 관리합니다.
 KR_STOCKS = [
     ("삼성전자", "005930.KS"), ("SK하이닉스", "000660.KS"), ("LG엔솔", "373220.KS"), ("삼성바이오", "207940.KS"), ("현대차", "005380.KS"),
     ("기아", "000270.KS"), ("셀트리온", "068270.KS"), ("KB금융", "105560.KS"), ("POSCO홀딩스", "005490.KS"), ("NAVER", "035420.KS"),
@@ -34,11 +32,9 @@ KR_STOCKS = [
     ("바이오니아", "064550.KQ"), ("STX", "011810.KS"), ("한화오션", "042660.KS"), ("LS", "006260.KS"), ("LS ELECTRIC", "010120.KS")
 ]
 
-# 티커를 넣으면 이름을 반환하는 딕셔너리 자동 생성
 NAME_MAP = {ticker: name for name, ticker in KR_STOCKS}
 STOCKS_KR = [ticker for name, ticker in KR_STOCKS]
 
-# --- [지표 계산 함수] ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -59,79 +55,73 @@ def calculate_macd(series):
     signal = macd.ewm(span=9, adjust=False).mean()
     return macd, signal
 
+def get_optimized_stocks(log_file, blacklist_file, original_tickers):
+    if not os.path.exists(log_file): return original_tickers, []
+    try:
+        df = pd.read_csv(log_file)
+        if len(df) < 10: return original_tickers, []
+        perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
+        count = df.groupby('종목').size()
+        bad_names = perf[(perf < 0.5) & (count >= 3)].index.tolist()
+        with open(blacklist_file, 'w') as f:
+            json.dump(bad_names, f)
+        bad_tickers = [t for name, t in KR_STOCKS if name in bad_names]
+        return [t for t in original_tickers if t not in bad_tickers], bad_names
+    except: return original_tickers, []
+
 def run_analysis():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.now(kst)
-    
-    review_reports, super_buys, strong_buys, normal_buys = [], [], [], []
-    down_count, total_analyzed = 0, 0
+    optimized_stocks, blacklisted = get_optimized_stocks('trade_log_kr.csv', 'blacklist_kr.json', STOCKS_KR)
+    review_reports, super_buys, strong_buys, normal_buys, trade_logs, total_analyzed, down_count = [], [], [], [], [], 0, 0
 
-    for s in STOCKS_KR:
+    for s in optimized_stocks:
         try:
             df = yf.download(s, period="50d", progress=False)
             if len(df) < 30: continue
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            
             close = df['Close']
             curr_p, prev_p = float(close.iloc[-1]), float(close.iloc[-2])
             ma20 = close.rolling(20).mean()
-            
             total_analyzed += 1
             if curr_p < float(ma20.iloc[-1]): down_count += 1
-            
-            # --- [복기] ---
-            ratio_temp = down_count / total_analyzed
-            y_target = 1.012 if ratio_temp > 0.6 else 1.020
+            y_target = 1.012 if (down_count/total_analyzed) > 0.6 else 1.020
             stock_name = NAME_MAP.get(s, s)
             
             if calculate_rsi(close).iloc[-2] < 35:
-                is_hit = "🎯익절" if float(df['High'].iloc[-1]) >= prev_p * y_target else "⏳보유"
-                review_reports.append(f"{stock_name}:{is_hit}")
+                is_hit_bool = float(df['High'].iloc[-1]) >= prev_p * y_target
+                review_reports.append(f"{stock_name}:{'🎯익절' if is_hit_bool else '⏳보유'}")
+                trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": stock_name, "목표가달성": "YES" if is_hit_bool else "NO"})
 
-            # --- [지표 분석] ---
-            rsi = float(calculate_rsi(close).iloc[-1])
-            mfi = float(calculate_mfi(df).iloc[-1])
+            rsi, mfi = float(calculate_rsi(close).iloc[-1]), float(calculate_mfi(df).iloc[-1])
             std = close.rolling(20).std()
             lower_b = float((ma20 - (std * 2)).iloc[-1])
             macd, signal = calculate_macd(close)
-            
             is_oversold = rsi < 32 or curr_p <= lower_b
             is_money_in = mfi < 35
             is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
-            
-            target_p = int(curr_p * (1.012 if ratio_temp > 0.6 else 1.020))
-            
-            if is_oversold and is_money_in and is_turning:
-                super_buys.append(f"🎯 *{stock_name}* ({target_p:,}원)")
-            elif is_oversold and is_money_in:
-                strong_buys.append(f"💎 *{stock_name}* ({target_p:,}원)")
-            elif is_oversold:
-                normal_buys.append(f"📈 *{stock_name}* ({target_p:,}원)")
-                
+            target_p = int(curr_p * y_target)
+
+            if is_oversold and is_money_in and is_turning: super_buys.append(f"🎯 *{stock_name}* ({target_p:,}원)")
+            elif is_oversold and is_money_in: strong_buys.append(f"💎 *{stock_name}* ({target_p:,}원)")
+            elif is_oversold: normal_buys.append(f"📈 *{stock_name}* ({target_p:,}원)")
         except: continue
 
-    mode = "⚠️ 하락방어" if (down_count/total_analyzed) > 0.6 else "🚀 정상추세"
-    
+    if trade_logs:
+        pd.DataFrame(trade_logs).to_csv('trade_log_kr.csv', mode='a', index=False, header=not os.path.exists('trade_log_kr.csv'), encoding='utf-8-sig')
+
+    mode = "⚠️ 하락방어" if (down_count/total_analyzed if total_analyzed > 0 else 0) > 0.6 else "🚀 정상추세"
+    evo_msg = f" (🤖 AI 제외: {len(blacklisted)}개)" if blacklisted else ""
     report = [
-        f"🇰🇷 *KOREA STOCK AI REPORT (100+)*",
-        f"📅 {now.strftime('%m-%d %H:%M')} (KST) | 📡 **{mode}**",
-        f"━━━━━━━━━━━━━━",
-        f"📊 **[전일 복기]**",
-        ", ".join(review_reports[:10]) if review_reports else "- 분석 대상 없음",
-        f"━━━━━━━━━━━━━━",
-        f"🎯 **[SUPER BUY]**",
-        "\n".join(super_buys[:5]) if super_buys else "- 해당 없음",
-        f"\n💎 **[STRONG BUY]**",
-        "\n".join(strong_buys[:10]) if strong_buys else "- 해당 없음",
-        f"\n🔍 **[NORMAL BUY]**",
-        "\n".join(normal_buys[:15]) if normal_buys else "- 해당 없음",
-        f"━━━━━━━━━━━━━━",
-        f"✅ 국장 `{total_analyzed}`종목 스캔 완료"
+        f"🇰🇷 *KOREA EVOLVING AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode}{evo_msg}", "━━━━━━━━━━━━━━",
+        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:10]) if review_reports else "- 분석 대상 없음"), "━━━━━━━━━━━━━━",
+        f"🎯 **[SUPER BUY]**\n" + ("\n".join(super_buys[:5]) if super_buys else "- 해당 없음"),
+        f"\n💎 **[STRONG BUY]**\n" + ("\n".join(strong_buys[:10]) if strong_buys else "- 해당 없음"),
+        f"\n🔍 **[NORMAL BUY]**\n" + ("\n".join(normal_buys[:15]) if normal_buys else "- 해당 없음"), "━━━━━━━━━━━━━━",
+        f"✅ {total_analyzed}종목 분석 완료"
     ]
-    
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
     run_analysis()
