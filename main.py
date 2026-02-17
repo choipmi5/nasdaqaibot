@@ -9,14 +9,21 @@ import pytz
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 
-# 분석 종목 리스트 (핵심 60~100개 요약본)
+# [확장된 100개 종목 리스트] 나스닥 100 핵심 + 인기 ETF
 STOCKS = [
     "QQQ", "TQQQ", "SQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", 
-    "AMD", "SOXL", "SOXS", "AVGO", "NFLX", "TSM", "ADBE", "INTC", "QCOM", "MU",
-    "PANW", "SNPS", "CDNS", "MAR", "LRCX", "ADSK", "MELI", "PYPL", "ABNB", "COST",
-    "CONL", "NVDL", "TSLL", "SOXX", "SCHD", "VOO", "IVV", "VTI", "UPRO", "TMF"
+    "AMD", "SOXL", "SOXS", "AVGO", "NFLX", "TSM", "ADBE", "COST", "PEP", "AZN", 
+    "LIN", "CSCO", "TMUS", "INTC", "TXN", "QCOM", "AMAT", "ADP", "ISRG", "SBUX", 
+    "MDLZ", "GILD", "INTU", "VRTX", "AMGN", "REGN", "PYPL", "FISV", "BKNG", "CSX", 
+    "MU", "PANW", "SNPS", "CDNS", "ORLY", "MNST", "MAR", "KDP", "CHTR", "KLAC", 
+    "AEP", "LRCX", "ADSK", "DXCM", "MELI", "IDXX", "PAYX", "CTAS", "LULU", "MCHP", 
+    "MRVL", "CPRT", "ODFL", "TEAM", "ALGN", "WDAY", "FAST", "PCAR", "ROST", "DLTR", 
+    "EBAY", "SIRI", "ZM", "JD", "LCID", "DDOG", "RIVN", "ENPH", "CEG", "ZS", 
+    "ABNB", "PDD", "OKTA", "CONL", "NVDL", "TSLL", "SOXX", "SCHD", "JEPI", "VOO", 
+    "IVV", "VTI", "UPRO", "TMF", "ARM", "PLTR", "SNOW", "U", "COIN", "MSTR"
 ]
 
+# --- [지표 계산 함수] ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -24,72 +31,99 @@ def calculate_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
+def calculate_mfi(df, period=14):
+    tp = (df['High'] + df['Low'] + df['Close']) / 3
+    mf = tp * df['Volume']
+    pos_f = mf.where(tp > tp.shift(1), 0).rolling(period).sum()
+    neg_f = mf.where(tp < tp.shift(1), 0).rolling(period).sum()
+    return 100 - (100 / (1 + (pos_f / neg_f)))
+
+def calculate_macd(series):
+    exp1 = series.ewm(span=12, adjust=False).mean()
+    exp2 = series.ewm(span=26, adjust=False).mean()
+    macd = exp1 - exp2
+    signal = macd.ewm(span=9, adjust=False).mean()
+    return macd, signal
+
 def run_analysis():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
-
     kst = pytz.timezone('Asia/Seoul')
     now = datetime.now(kst)
     
-    review_reports = []
-    buy_signals = []
-    down_count = 0
-    total_analyzed = 0
+    review_reports, super_buys, strong_buys, normal_buys = [], [], [], []
+    down_count, total_analyzed = 0, 0
 
-    # 데이터 수집 및 분석 시작
+    # 데이터 수집 및 분석
     for s in STOCKS:
         try:
-            df = yf.download(s, period="40d", progress=False)
-            if len(df) < 20: continue
+            df = yf.download(s, period="50d", progress=False)
+            if len(df) < 30: continue
             if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
             
             close = df['Close']
-            high = df['High']
             curr_p = float(close.iloc[-1])
             prev_p = float(close.iloc[-2])
-            ma20 = float(close.rolling(20).mean().iloc[-1])
-            rsi = float(calculate_rsi(close).iloc[-1])
+            ma20 = close.rolling(20).mean()
             
             total_analyzed += 1
-            if curr_p < ma20: down_count += 1
+            if curr_p < float(ma20.iloc[-1]): down_count += 1
             
-            # --- [자가 분석: 어제 추천했다면 오늘 익절했는가?] ---
-            # (어제 RSI가 35 미만이었다고 가정할 때, 오늘의 고가가 어제 종가 대비 목표 수익률을 찍었는지 확인)
-            prev_rsi = calculate_rsi(close).iloc[-2]
-            if prev_rsi < 35:
-                target_price = prev_p * 1.015 # 어제 설정했을 목표가 (1.5%)
-                is_hit = "🎯 익절완료" if float(high.iloc[-1]) >= target_price else "⏳ 보유중"
-                review_reports.append(f"{s}: {is_hit} (고가: {((high.iloc[-1]/prev_p)-1)*100:+.1f}%)")
+            # --- [자가 복기: 어제 목표가 도달 확인] ---
+            # 하락장 비율 60% 이상이면 1.5%, 아니면 2.5% 타겟
+            ratio_temp = down_count / total_analyzed
+            y_target = 1.015 if ratio_temp > 0.6 else 1.025
+            
+            if calculate_rsi(close).iloc[-2] < 35:
+                is_hit = "🎯익절" if float(df['High'].iloc[-1]) >= prev_p * y_target else "⏳보유"
+                review_reports.append(f"{s}:{is_hit}")
 
-            # --- [오늘의 신규 추천 로직] ---
-            if rsi < 32:
-                buy_signals.append(f"📈 *{s}* (RSI: `{rsi:.1f}`, 현재: `${curr_p:.2f}`)")
+            # --- [지표 분석] ---
+            rsi = float(calculate_rsi(close).iloc[-1])
+            mfi = float(calculate_mfi(df).iloc[-1])
+            std = close.rolling(20).std()
+            lower_b = float((ma20 - (std * 2)).iloc[-1])
+            macd, signal = calculate_macd(close)
+            
+            is_oversold = rsi < 32 or curr_p <= lower_b
+            is_money_in = mfi < 35
+            is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
+
+            target_p = f"${curr_p * (1.015 if ratio_temp > 0.6 else 1.025):.2f}"
+            
+            if is_oversold and is_money_in and is_turning:
+                super_buys.append(f"🎯 *{s}* (목표: {target_p})")
+            elif is_oversold and is_money_in:
+                strong_buys.append(f"💎 *{s}* (목표: {target_p})")
+            elif is_oversold:
+                normal_buys.append(f"📈 *{s}* (목표: {target_p})")
+                
         except: continue
 
-    # 시장 모드 판별
-    ratio = down_count / total_analyzed if total_analyzed > 0 else 0
-    mode = "⚠️ 하락장 방어" if ratio > 0.6 else "🚀 정상 추세"
-    profit_target = "1.5%" if ratio > 0.6 else "2.0~2.5%"
-
     # 리포트 구성
+    ratio = down_count / total_analyzed if total_analyzed > 0 else 0
+    mode = "⚠️ 하락방어" if ratio > 0.6 else "🚀 정상추세"
+    
     report = [
-        f"🤖 *AI SELF-DIAGNOSIS FINAL*",
-        f"📅 {now.strftime('%m-%d %H:%M')} (KST)",
+        f"🤖 *AI SELF-DIAGNOSIS TOTAL (100+)*",
+        f"📅 {now.strftime('%m-%d %H:%M')} (KST) | 📡 **{mode}**",
         f"━━━━━━━━━━━━━━",
-        f"📡 **시장 모드:** {mode} ({ratio*100:.0f}%)",
-        f"🎯 **오늘의 익절 목표:** `{profit_target}`",
+        f"📊 **[어제 예측 복기]**",
+        ", ".join(review_reports[:10]) if review_reports else "- 분석 대상 없음",
         f"━━━━━━━━━━━━━━",
-        f"📊 **[어제 추천주 복기]**",
-        "\n".join(review_reports[:7]) if review_reports else "- 복기 대상 종목 없음",
+        f"🎯 **[SUPER BUY]**",
+        "\n".join(super_buys[:5]) if super_buys else "- 해당 없음",
+        f"\n💎 **[STRONG BUY]**",
+        "\n".join(strong_buys[:10]) if strong_buys else "- 해당 없음",
+        f"\n🔍 **[NORMAL BUY]**",
+        "\n".join(normal_buys[:15]) if normal_buys else "- 해당 없음",
         f"━━━━━━━━━━━━━━",
-        f"🔥 **[실시간 매수 추천]**",
-        "\n".join(buy_signals[:15]) if buy_signals else "- 현재 매수 적정 종목 없음",
-        f"━━━━━━━━━━━━━━",
-        f"✅ 분석 완료: `{total_analyzed}` 종목"
+        f"✅ `{total_analyzed}`종목 전수 분석 완료"
     ]
     
-    msg = "\n".join(report)
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"})
+                  json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
     run_analysis()
+
+
