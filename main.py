@@ -62,11 +62,11 @@ def get_optimized_stocks(log_file, blacklist_file, original_stocks):
         count = df.groupby('종목').size()
         
         # 기본 블랙리스트: 3회 이상 추천, 승률 50% 미만
-        bad_stocks = perf[(perf < 0.5) & (count >= 3)].index.tolist()
+        bad_stocks = perf[(perf < 0.5) & (count >= 10)].index.tolist()
         
         # [패자부활전] 지수가 회복세일 경우, 승률 45% 이상인 종목은 한시적 복귀
         if market_recovery:
-            reborn_stocks = [s for s in bad_stocks if perf[s] >= 0.45]
+            reborn_stocks = [s for s in bad_stocks if perf[s] >= 0.30]
             bad_stocks = [s for s in bad_stocks if s not in reborn_stocks]
             
         with open(blacklist_file, 'w') as f:
@@ -144,6 +144,7 @@ def run_analysis():
 
 if __name__ == "__main__":
     run_analysis()
+
 
 
 
