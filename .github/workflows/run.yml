@@ -3,7 +3,7 @@ name: Nasdaq AI Bot Realtime
 on:
   schedule:
     # 미국 장중 및 마감 시간 (UTC 기준 설정)
-    - cron: '0 14,18,21 * * 1-5'
+    - cron: '2 14,18,21 * * 1-5'
   workflow_dispatch:
 
 jobs:
