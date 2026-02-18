@@ -141,7 +141,7 @@ def run_analysis():
             # 등급별 분류
             is_buy = rsi < 40 and is_turning
             
-            if is_buy and market_recovery and "⚠️" not in extra['earnings']:
+            if is_buy and "⚠️" not in extra['earnings']:
                 order_res = buy_stock(s, hantu_token)
                 status = " [✅주문]" if order_res.get('rt_cd') == '0' else " [❌실패]"
                 super_buys.append(detail + status)
@@ -164,5 +164,6 @@ def run_analysis():
 
 if __name__ == "__main__":
     run_analysis()
+
 
 
