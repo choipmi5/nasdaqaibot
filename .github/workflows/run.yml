@@ -1,4 +1,4 @@
-name: Nasdaq AI Bot Realtime  # [수정됨] 소문자 n으로 시작해야 합니다.
+name: Nasdaq AI Bot Realtime
 
 on:
   schedule:
@@ -24,20 +24,27 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # 파일이 혹시 없을 경우를 대비해 직접 설치 명령어도 추가해둡니다.
+          # 필요한 라이브러리 직접 설치 (안전장치)
           pip install yfinance requests pytz pandas google-generativeai
 
-      - name: Run AI Bot
+      - name: Run AI Auto Trader
         env:
+          # 1. 기존 알림 및 AI 키
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: test_hantu.py
+          
+          # 2. [추가] 한국투자증권 API 키 (모의투자용)
+          HANTU_APP_KEY: ${{ secrets.HANTU_APP_KEY }}
+          HANTU_SECRET_KEY: ${{ secrets.HANTU_SECRET_KEY }}
+          HANTU_ACCOUNT_NO: ${{ secrets.HANTU_ACCOUNT_NO }}
+        run: python main.py
+
       - name: Commit and Push Evolution Data
         run: |
           git config --global user.name "GitHub Action Bot"
           git config --global user.email "actions@github.com"
           git add trade_log_nasdaq.csv blacklist_nasdaq.json || echo "No files to add"
-          git commit -m "AI Self-Evolution: Update logs and blacklist [skip ci]" || echo "No changes to commit"
+          git commit -m "AI Trading: Update logs and data [skip ci]" || echo "No changes to commit"
           git pull --rebase origin main
           git push
