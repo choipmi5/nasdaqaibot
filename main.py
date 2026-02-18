@@ -171,14 +171,40 @@ def run_analysis():
 
     if trade_logs: pd.DataFrame(trade_logs).to_csv('trade_log_nasdaq.csv', mode='a', index=False, header=not os.path.exists('trade_log_nasdaq.csv'), encoding='utf-8-sig')
     
+        # 리포트 발송 부분 수정 (상세 정보 포함)
     report = [
-        f"🇺🇸 *NASDAQ PRO AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
-        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:10]) if review_reports else "-"),
-        f"\n🚀 **[AUTO BUY]**\n" + ("\n".join(super_buys) if super_buys else "-"),
-        f"\n💎 **[STRONG BUY]**\n" + ("\n".join(strong_buys[:5]) if strong_buys else "-"), "━━━━━━━━━━━━━━",
-        f"✅ {total_analyzed}분석 (시장:{int((1-ratio)*100)}점)"
+        f"🇺🇸 *NASDAQ PRO AI*", 
+        f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", 
+        "━━━━━━━━━━━━━━",
+        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:10]) if review_reports else "-")
     ]
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
+
+    if super_buys:
+        report.append(f"\n🎯 **[AUTO BUY]** (자동 주문 완료)\n" + "\n".join(super_buys))
+    
+    if strong_buys:
+        report.append(f"\n💎 **[STRONG BUY]** (강력 추천)\n" + "\n".join(strong_buys))
+
+    # [수정] NORMAL BUY 섹션을 다시 추가하고 상세 정보를 표시합니다.
+    normal_display = []
+    for s, df in temp_data:
+        # RSI가 40 이하인 관심 종목들 추출
+        rsi = float(calculate_rsi(df['Close']).iloc[-1])
+        if 32 <= rsi <= 40:
+            curr_p = float(df['Close'].iloc[-1])
+            # 뉴스 분석 다시 가져오기 (이미 temp_data에 포함되어 있어야 함)
+            normal_display.append(f"📈 *{s}*\n📍 Buy: ${curr_p:.2f} | RSI: {rsi:.1f}")
+    
+    if normal_display:
+        report.append(f"\n🔍 **[WATCHLIST]**\n" + "\n".join(normal_display[:10]))
+
+    report.append("━━━━━━━━━━━━━━")
+    report.append(f"✅ {total_analyzed}분석 (시장점수: {int((1-ratio)*100)}점)")
+
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                  json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
+
 
 if __name__ == "__main__":
     run_analysis()
+
