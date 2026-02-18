@@ -128,7 +128,7 @@ def run_analysis():
             is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
             
             stop_loss = curr_p * 0.98 # 손절가 -2.0% 타이트하게 고정
-            toss_link = f"https://tossinvest.com/stocks/{s}" # 토스 링크
+            toss_link = f"https://tossinvest.com/stocks/{s}"  # 토스 링크
             
             t_info = (f"📍 Buy: ${curr_p:.2f}\n🎯 Target: ${curr_p * t1:.2f} / ${curr_p * t2:.2f}\n"
                       f"🛑 Stop: ${stop_loss:.2f}\n"
@@ -159,6 +159,7 @@ def run_analysis():
 
 if __name__ == "__main__":
     run_analysis()
+
 
 
 
