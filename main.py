@@ -139,7 +139,7 @@ def run_analysis():
             detail = f"📈 *{s}*\n📍 Buy: ${curr_p:.2f}\n🎯 Target: ${curr_p*t1:.2f} / ${curr_p*t2:.2f}\n🛑 Stop: ${stop_p:.2f}\n📊 뉴스:{extra['sentiment']} | 실적:{extra['earnings']} | 옵션:{extra['option']}"
 
             # 등급별 분류
-            is_buy = (rsi < 32 or curr_p <= (close.rolling(20).mean() - close.rolling(20).std()*2).iloc[-1]) and mfi < 35 and is_turning
+            is_buy = rsi < 40 and is_turning
             
             if is_buy and market_recovery and "⚠️" not in extra['earnings']:
                 order_res = buy_stock(s, hantu_token)
@@ -164,4 +164,5 @@ def run_analysis():
 
 if __name__ == "__main__":
     run_analysis()
+
 
