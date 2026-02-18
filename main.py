@@ -3,11 +3,12 @@ import yfinance as yf
 import pandas as pd
 import requests
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timedelta
 import pytz
 import google.generativeai as genai
 
-# 환경 설정
+# [설정] 환경 변수
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
@@ -16,36 +17,11 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
 
-STOCKS = [
-    "QQQ", "TQQQ", "SQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", 
-    "AMD", "SOXL", "SOXS", "AVGO", "NFLX", "TSM", "ADBE", "COST", "PEP", "AZN", 
-    "LIN", "CSCO", "TMUS", "INTC", "TXN", "QCOM", "AMAT", "ADP", "ISRG", "SBUX", 
-    "MDLZ", "GILD", "INTU", "VRTX", "AMGN", "REGN", "PYPL", "FISV", "BKNG", "CSX", 
-    "MU", "PANW", "SNPS", "CDNS", "ORLY", "MNST", "MAR", "KDP", "CHTR", "KLAC", 
-    "AEP", "LRCX", "ADSK", "DXCM", "MELI", "IDXX", "PAYX", "CTAS", "LULU", "MCHP", 
-    "MRVL", "CPRT", "ODFL", "TEAM", "ALGN", "WDAY", "FAST", "PCAR", "ROST", "DLTR", 
-    "EBAY", "SIRI", "ZM", "JD", "LCID", "DDOG", "RIVN", "ENPH", "CEG", "ZS", 
-    "ABNB", "PDD", "OKTA", "CONL", "NVDL", "TSLL", "SOXX", "SCHD", "JEPI", "VOO", 
-    "IVV", "VTI", "UPRO", "TMF", "ARM", "PLTR", "SNOW", "U", "COIN", "MSTR"
-]
+STOCKS = ["QQQ", "TQQQ", "SQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AMD", "SOXL", "SOXS", "AVGO", "NFLX", "TSM", "ADBE", "COST", "PEP", "AZN", "LIN", "CSCO", "TMUS", "INTC", "TXN", "QCOM", "AMAT", "ADP", "ISRG", "SBUX", "MDLZ", "GILD", "INTU", "VRTX", "AMGN", "REGN", "PYPL", "FISV", "BKNG", "CSX", "MU", "PANW", "SNPS", "CDNS", "ORLY", "MNST", "MAR", "KDP", "CHTR", "KLAC", "AEP", "LRCX", "ADSK", "DXCM", "MELI", "IDXX", "PAYX", "CTAS", "LULU", "MCHP", "MRVL", "CPRT", "ODFL", "TEAM", "ALGN", "WDAY", "FAST", "PCAR", "ROST", "DLTR", "EBAY", "SIRI", "ZM", "JD", "LCID", "DDOG", "RIVN", "ENPH", "CEG", "ZS", "ABNB", "PDD", "OKTA", "CONL", "NVDL", "TSLL", "SOXX", "SCHD", "JEPI", "VOO", "IVV", "VTI", "UPRO", "TMF", "ARM", "PLTR", "SNOW", "U", "COIN", "MSTR"]
 
-def get_optimized_stocks(log_file, blacklist_file, original_stocks):
-    market_recovery = False
-    try:
-        market_df = yf.download("QQQ", period="2d", interval="1h", progress=False)
-        if not market_df.empty:
-            if isinstance(market_df.columns, pd.MultiIndex): market_df.columns = market_df.columns.get_level_values(0)
-            market_recovery = market_df['Close'].iloc[-1] > market_df['Close'].iloc[0]
-    except: pass
-    if not os.path.exists(log_file): return original_stocks, market_recovery
-    try:
-        df = pd.read_csv(log_file)
-        perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
-        count = df.groupby('종목').size()
-        eval_stocks = count[count >= 5].index.tolist()
-        bad_stocks = [s for s in eval_stocks if perf[s] < 0.3]
-        return [s for s in original_stocks if s not in bad_stocks], market_recovery
-    except: return original_stocks, market_recovery
+def flatten_df(df):
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    return df
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -61,113 +37,124 @@ def calculate_mfi(df, period=14):
     return 100 - (100 / (1 + (pos_f / neg_f)))
 
 def calculate_macd(series):
-    exp1 = series.ewm(span=12, adjust=False).mean(); exp2 = series.ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2; signal = macd.ewm(span=9, adjust=False).mean()
-    return macd, signal
+    exp1 = series.ewm(span=12, adjust=False).mean()
+    exp2 = series.ewm(span=26, adjust=False).mean()
+    macd = exp1 - exp2
+    return macd, macd.ewm(span=9, adjust=False).mean()
 
 def get_comprehensive_data(s, t_obj):
     analysis = {"sentiment": "중립", "earnings": "안정", "option": "중립", "score": 0}
     try:
-        news = t_obj.news[:5]
+        news = t_obj.news[:3]
         if news and GEMINI_API_KEY:
             titles = [n['title'] for n in news]
-            prompt = f"Analyze {s}: {titles}. One word: Positive, Negative, Neutral."
-            response = model.generate_content(prompt)
-            res = response.text.strip().capitalize()
+            prompt = f"Analyze stock {s}: {titles}. Respond ONLY with one word: Positive, Negative, or Neutral."
+            res = model.generate_content(prompt).text.strip().capitalize()
             analysis["sentiment"] = "호재" if "Positive" in res else "악재" if "Negative" in res else "중립"
             if analysis["sentiment"] == "호재": analysis["score"] += 20
     except: pass
     try:
         cal = t_obj.calendar
-        if cal is not None and 'Earnings Date' in cal:
-            days = (cal['Earnings Date'][0].replace(tzinfo=None) - datetime.now()).days
-            if 0 <= days <= 7: analysis["earnings"] = f"⚠️D-{days}"; analysis["score"] -= 30
+        e_date = cal['Earnings Date'][0] if isinstance(cal, dict) else cal.iloc[0][0]
+        # 시간대 에러 방지 (둘 다 naive로 변환)
+        days = (pd.to_datetime(e_date).replace(tzinfo=None) - datetime.now().replace(tzinfo=None)).days
+        if 0 <= days <= 7: 
+            analysis["earnings"] = f"⚠️D-{days}"
+            analysis["score"] -= 40
     except: pass
     try:
-        exp = t_obj.options[0]
-        opt = t_obj.option_chain(exp)
-        p_vol, c_vol = opt.puts['volume'].sum(), opt.calls['volume'].sum()
-        pc_ratio = p_vol / c_vol if c_vol > 0 else 1.0
+        opt_info = t_obj.option_chain(t_obj.options[0])
+        pc_ratio = opt_info.puts['volume'].sum() / opt_info.calls['volume'].sum()
         analysis["option"] = "상승베팅" if pc_ratio < 0.7 else "하락베팅" if pc_ratio > 1.3 else "중립"
         if pc_ratio < 0.7: analysis["score"] += 15
     except: pass
     return analysis
 
 def run_analysis():
+    print("🚀 Full-Scan Analysis started...")
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
-    optimized_stocks, market_recovery = get_optimized_stocks('trade_log_nasdaq.csv', 'blacklist_nasdaq.json', STOCKS)
-    review_reports, super_buys, strong_buys, normal_buys, trade_logs, total_analyzed, down_count, temp_data = [], [], [], [], [], 0, 0, []
+    
+    market_df = flatten_df(yf.download("QQQ", period="5d", progress=False))
+    market_recovery = (market_df['Close'].iloc[-1] > market_df['Close'].iloc[-2]) if not market_df.empty else False
+    
+    review_reports, super_buys, strong_buys, normal_buys, trade_logs = [], [], [], [], []
+    total_analyzed, down_count = 0, 0
 
-    for s in optimized_stocks:
+    for idx, s in enumerate(STOCKS):
+        print(f"[{idx+1}/{len(STOCKS)}] {s}", end='\r')
         try:
-            t_obj = yf.Ticker(s); df = t_obj.history(period="50d")
-            recent_tick = t_obj.history(period="1d", interval="1m")
-            if len(df) < 30 or recent_tick.empty: continue
-            curr_p = float(recent_tick['Close'].iloc[-1])
+            t_obj = yf.Ticker(s)
+            df = flatten_df(t_obj.history(period="60d"))
+            if len(df) < 30: continue
+            
+            recent = t_obj.history(period="1d", interval="1m")
+            curr_p = float(recent['Close'].iloc[-1]) if not recent.empty else float(df['Close'].iloc[-1])
             total_analyzed += 1
-            if curr_p < float(df['Close'].rolling(20).mean().iloc[-1]): down_count += 1
-            temp_data.append((s, df, t_obj, curr_p))
-        except: continue
+            
+            # [수정] 복기 로직 통합 (어제 RSI 36 미만 종목의 성적 체크)
+            rsi_series = calculate_rsi(df['Close'])
+            if len(rsi_series) > 1 and rsi_series.iloc[-2] < 36:
+                high_today = float(df['High'].iloc[-1])
+                prev_close = float(df['Close'].iloc[-2])
+                hit = high_today >= prev_close * 1.025 # 어제 종가 대비 2.5% 이상 상승 시 성공
+                review_reports.append(f"{s}:{'🎯' if hit else '⏳'}")
 
-    ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
-    t1, t2 = (1.025, 1.050) if ratio < 0.3 else (1.015, 1.030) if ratio < 0.6 else (1.008, 1.015)
-    mode_str = "🚀 불장" if ratio < 0.3 else "📈 보통" if ratio < 0.6 else "⚠️ 하락"
-
-    for s, df, t_obj, curr_p in temp_data:
-        try:
-            close = df['Close']; prev_p = float(close.iloc[-1]); high_p = float(df['High'].iloc[-1]); vol = df['Volume']
-            if calculate_rsi(close).iloc[-2] < 36:
-                hit1, hit2 = high_p >= prev_p * t1, high_p >= prev_p * t2
-                status = "🎯" if hit2 else ("🌗" if hit1 else "⏳")
-                review_reports.append(f"{s}:{status}")
-                trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": s, "목표가달성": "YES" if hit2 else "NO"})
-
-            extra = get_comprehensive_data(s, t_obj)
-            rsi = float(calculate_rsi(close).iloc[-1])
+            # 기술 지표
+            ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+            if curr_p < ma20: down_count += 1
             mfi = float(calculate_mfi(df).iloc[-1])
-            macd, signal = calculate_macd(close)
-            
-            is_vol_spike = vol.iloc[-1] > vol.rolling(5).mean().iloc[-1] * 1.2
-            is_oversold = rsi < 36 or curr_p <= float((close.rolling(20).mean() - (close.rolling(20).std() * 2)).iloc[-1])
-            is_money_in = mfi < 40
+            macd, signal = calculate_macd(df['Close'])
+            is_oversold = rsi_series.iloc[-1] < 36 or curr_p <= (ma20 - (df['Close'].rolling(20).std().iloc[-1] * 2))
             is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
+            is_vol_spike = float(df['Volume'].iloc[-1]) > float(df['Volume'].rolling(5).mean().iloc[-1]) * 1.2
             
-            stop_loss = curr_p * 0.98 
+            extra = get_comprehensive_data(s, t_obj)
+            total_score = extra['score'] + (20 if is_oversold else 0) + (10 if is_turning else 0) + (10 if is_vol_spike else 0)
+            
+            # ATR 기반 목표가
+            atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+            t1_p, t2_p, stop_p = curr_p + (atr * 1.5), curr_p + (atr * 3.0), curr_p - (atr * 1.0)
+            
             toss_link = f"https://tossinvest.com/stocks/{s}"
-            
-            t_info = (f"🔥 **`{s}`** (복사)\n"
-                      f"📍 Buy: ${curr_p:.2f}\n🎯 Target: ${curr_p * t1:.2f} / ${curr_p * t2:.2f}\n"
-                      f"🛑 Stop: ${stop_loss:.2f}\n"
+            t_info = (f"🔥 **`{s}`** (점수:{total_score})\n📍 Buy: ${curr_p:.2f} (RSI:{rsi_series.iloc[-1]:.1f})\n"
+                      f"🎯 Target: ${t1_p:.2f} / ${t2_p:.2f}\n🛑 Stop: ${stop_p:.2f}\n"
                       f"📊 뉴스:{extra['sentiment']} | 실적:{extra['earnings']} | 옵션:{extra['option']}\n"
-                      f"🔗 [크롬/앱으로 주문하기]({toss_link})")
-            
-            if "⚠️" in extra['earnings']: continue 
+                      f"🔗 [주문하기]({toss_link})")
 
-            # 등급 판정 로직 복구 및 강화
-            if is_oversold and is_money_in and is_turning and is_vol_spike and market_recovery:
+            if "⚠️" in extra['earnings']: continue
+            
+            if is_oversold and mfi < 40 and is_turning and is_vol_spike and market_recovery and total_score > 30:
                 super_buys.append(t_info)
-            elif is_oversold and (is_money_in or is_turning) and (is_vol_spike or extra['score'] > 20):
+                trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": s, "목표가달성": "ING"})
+            elif is_oversold and (mfi < 40 or is_turning) and (is_vol_spike or total_score > 20):
                 strong_buys.append(t_info)
-            elif is_oversold:
+            elif is_oversold or total_score > 50:
                 normal_buys.append(t_info)
+            
+            time.sleep(0.4) # API 속도 최적화
         except: continue
 
-    if trade_logs: pd.DataFrame(trade_logs).to_csv('trade_log_nasdaq.csv', mode='a', index=False, header=not os.path.exists('trade_log_nasdaq.csv'), encoding='utf-8-sig')
+    # 결과 전송
+    ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
+    mode_str = "🚀 불장" if ratio < 0.3 else "📈 보통" if ratio < 0.6 else "⚠️ 하락"
     
     report = [
-        f"🇺🇸 *NASDAQ PRO AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
-        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:15]) if review_reports else "-"), "━━━━━━━━━━━━━━",
+        f"🇺🇸 *NASDAQ PRO AI (Full-Scan)*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
+        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:15]) if review_reports else "- 분석 데이터 없음"), "━━━━━━━━━━━━━━",
         f"🎯 **[SUPER BUY]**\n" + ("\n\n".join(super_buys[:5]) if super_buys else "- 없음"),
-        f"\n💎 **[STRONG BUY]**\n" + ("\n\n".join(strong_buys[:10]) if strong_buys else "- 없음"),
-        f"\n🔍 **[NORMAL BUY]**\n" + ("\n\n".join(normal_buys[:15]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
-        f"✅ {total_analyzed}분석 (시장점수: {int((1-ratio)*100)}점)"
+        f"\n💎 **[STRONG BUY]**\n" + ("\n\n".join(strong_buys[:7]) if strong_buys else "- 없음"),
+        f"\n🔍 **[NORMAL BUY]**\n" + ("\n\n".join(normal_buys[:10]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
+        f"✅ {total_analyzed}개 분석 (시장점수: {int((1-ratio)*100)}점)"
     ]
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                  json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown", "disable_web_page_preview": True})
+    
+    full_text = "\n".join(report)
+    for part in [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": part, "parse_mode": "Markdown", "disable_web_page_preview": True})
 
 if __name__ == "__main__":
     run_analysis()
+
 
 
 
