@@ -78,28 +78,19 @@ def calculate_macd(series):
     macd = exp1 - exp2; signal = macd.ewm(span=9, adjust=False).mean()
     return macd, signal
 
-def get_optimized_stocks(log_file, blacklist_file, original_stocks):
+def get_optimized_stocks(log_file, original_stocks):
     market_recovery = False
     try:
         market_df = yf.download("QQQ", period="50d", progress=False)
         if isinstance(market_df.columns, pd.MultiIndex): market_df.columns = market_df.columns.get_level_values(0)
         market_recovery = market_df['Close'].iloc[-1] > market_df['Close'].rolling(20).mean().iloc[-1]
     except: pass
-    if not os.path.exists(log_file): return original_stocks, market_recovery
-    try:
-        df = pd.read_csv(log_file)
-        perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
-        count = df.groupby('종목').size()
-        eval_stocks = count[count >= 10].index.tolist()
-        bad_stocks = [s for s in eval_stocks if perf[s] < 0.3]
-        if not market_recovery: bad_stocks.extend([s for s in eval_stocks if 0.3 <= perf[s] < 0.5])
-        return [s for s in original_stocks if s not in bad_stocks], market_recovery
-    except: return original_stocks, market_recovery
+    return original_stocks, market_recovery
 
 def run_analysis():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
-    optimized_stocks, market_recovery = get_optimized_stocks('trade_log_nasdaq.csv', 'blacklist_nasdaq.json', STOCKS)
+    optimized_stocks, market_recovery = get_optimized_stocks('trade_log_nasdaq.csv', STOCKS)
     review_reports, super_buys, strong_buys, normal_buys, trade_logs, total_analyzed, down_count, temp_data = [], [], [], [], [], 0, 0, []
 
     for s in optimized_stocks:
@@ -120,7 +111,8 @@ def run_analysis():
             close = df['Close']; curr_p, prev_p = float(close.iloc[-1]), float(close.iloc[-2])
             high_p, vol = float(df['High'].iloc[-1]), df['Volume']
             
-            if calculate_rsi(close).iloc[-2] < 36: # 복기 기준도 상향
+            # 복기 기준 상향 (RSI 36)
+            if calculate_rsi(close).iloc[-2] < 36:
                 hit1, hit2 = high_p >= prev_p * t1, high_p >= prev_p * t2
                 status = "🎯" if hit2 else ("🌗" if hit1 else "⏳")
                 review_reports.append(f"{s}:{status}")
@@ -135,14 +127,13 @@ def run_analysis():
             is_money_in = mfi < 40
             is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
             
-            stop_loss = curr_p * 0.98 # 손절가 -2.0% 타이트하게
-            # 한국투자증권 MTS 해외주식 주문 화면 스킴
-            hantu_link = f"kakaotstock://move?menu=5000&code={s}&market=NAS"
+            stop_loss = curr_p * 0.98 # 손절가 -2.0% 타이트하게 고정
+            toss_link = f"https://tossinvest.com/stocks/{s}" # 토스 링크
             
             t_info = (f"📍 Buy: ${curr_p:.2f}\n🎯 Target: ${curr_p * t1:.2f} / ${curr_p * t2:.2f}\n"
                       f"🛑 Stop: ${stop_loss:.2f}\n"
                       f"📊 뉴스:{extra['sentiment']} | 실적:{extra['earnings']} | 옵션:{extra['option']}\n"
-                      f"🔗 [한투 앱에서 주문하기]({hantu_link})")
+                      f"🔗 [토스에서 주문하기]({toss_link})")
             
             if "⚠️위험" in extra['earnings']: continue 
 
@@ -159,15 +150,17 @@ def run_analysis():
     report = [
         f"🇺🇸 *NASDAQ PRO AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
         f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:10]) if review_reports else "-"), "━━━━━━━━━━━━━━",
-        f"🎯 **[SUPER BUY]**\n" + ("\n".join(super_buys[:5]) if super_buys else "- 없음"),
-        f"\n💎 **[STRONG BUY]**\n" + ("\n".join(strong_buys[:10]) if strong_buys else "- 없음"),
-        f"\n🔍 **[NORMAL BUY]**\n" + ("\n".join(normal_buys[:15]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
+        f"🎯 **[SUPER BUY]**\n" + ("\n\n".join(super_buys[:5]) if super_buys else "- 없음"),
+        f"\n💎 **[STRONG BUY]**\n" + ("\n\n".join(strong_buys[:10]) if strong_buys else "- 없음"),
+        f"\n🔍 **[NORMAL BUY]**\n" + ("\n\n".join(normal_buys[:15]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
         f"✅ {total_analyzed}분석 (시장점수: {int((1-ratio)*100)}점)"
     ]
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown", "disable_web_page_preview": True})
 
 if __name__ == "__main__":
     run_analysis()
+
+
 
 
 
