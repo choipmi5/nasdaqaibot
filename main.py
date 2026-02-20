@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 import pytz
 import google.generativeai as genai
 
-# [설정] 환경 변수
+# [1. 환경 설정]
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
@@ -17,144 +17,193 @@ if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
 
-STOCKS = ["QQQ", "TQQQ", "SQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AMD", "SOXL", "SOXS", "AVGO", "NFLX", "TSM", "ADBE", "COST", "PEP", "AZN", "LIN", "CSCO", "TMUS", "INTC", "TXN", "QCOM", "AMAT", "ADP", "ISRG", "SBUX", "MDLZ", "GILD", "INTU", "VRTX", "AMGN", "REGN", "PYPL", "FISV", "BKNG", "CSX", "MU", "PANW", "SNPS", "CDNS", "ORLY", "MNST", "MAR", "KDP", "CHTR", "KLAC", "AEP", "LRCX", "ADSK", "DXCM", "MELI", "IDXX", "PAYX", "CTAS", "LULU", "MCHP", "MRVL", "CPRT", "ODFL", "TEAM", "ALGN", "WDAY", "FAST", "PCAR", "ROST", "DLTR", "EBAY", "SIRI", "ZM", "JD", "LCID", "DDOG", "RIVN", "ENPH", "CEG", "ZS", "ABNB", "PDD", "OKTA", "CONL", "NVDL", "TSLL", "SOXX", "SCHD", "JEPI", "VOO", "IVV", "VTI", "UPRO", "TMF", "ARM", "PLTR", "SNOW", "U", "COIN", "MSTR"]
+# [2. 섹터 및 종목 리스트]
+SECTORS = {
+    "SEMICON": ["NVDA", "AMD", "AVGO", "TSM", "MU", "ARM", "LRCX", "AMAT", "SOXL"],
+    "BIGTECH": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NFLX", "QQQ"],
+    "AI/SW/FIN": ["PLTR", "SNOW", "ADBE", "ORCL", "CRM", "PANW", "COIN", "MSTR"]
+}
 
+STOCKS = list(set(["QQQ", "TQQQ", "SQQQ", "NVDA", "TSLA", "AAPL", "MSFT", "AMZN", "GOOGL", "META", "AMD", "SOXL", "SOXS", "AVGO", "NFLX", "TSM", "ADBE", "COST", "PEP", "AZN", "LIN", "CSCO", "TMUS", "INTC", "TXN", "QCOM", "AMAT", "ADP", "ISRG", "SBUX", "MDLZ", "GILD", "INTU", "VRTX", "AMGN", "REGN", "PYPL", "FISV", "BKNG", "CSX", "MU", "PANW", "SNPS", "CDNS", "ORLY", "MNST", "MAR", "KDP", "CHTR", "KLAC", "AEP", "LRCX", "ADSK", "DXCM", "MELI", "IDXX", "PAYX", "CTAS", "LULU", "MCHP", "MRVL", "CPRT", "ODFL", "TEAM", "ALGN", "WDAY", "FAST", "PCAR", "ROST", "DLTR", "EBAY", "SIRI", "ZM", "JD", "LCID", "DDOG", "RIVN", "ENPH", "CEG", "ZS", "ABNB", "PDD", "OKTA", "CONL", "NVDL", "TSLL", "SOXX", "SCHD", "JEPI", "VOO", "IVV", "VTI", "UPRO", "TMF", "ARM", "PLTR", "SNOW", "U", "COIN", "MSTR"]))
+
+# [3. 핵심 유틸리티 함수]
 def flatten_df(df):
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     return df
 
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    return 100 - (100 / (1 + (gain / loss)))
-
-def calculate_mfi(df, period=14):
+def calculate_indicators(df):
+    # RSI
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    df['RSI'] = 100 - (100 / (1 + (gain / loss)))
+    
+    # MFI
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     mf = tp * df['Volume']
-    pos_f = mf.where(tp > tp.shift(1), 0).rolling(period).sum()
-    neg_f = mf.where(tp < tp.shift(1), 0).rolling(period).sum()
-    return 100 - (100 / (1 + (pos_f / neg_f)))
+    pos_f = mf.where(tp > tp.shift(1), 0).rolling(14).sum()
+    neg_f = mf.where(tp < tp.shift(1), 0).rolling(14).sum()
+    df['MFI'] = 100 - (100 / (1 + (pos_f / neg_f)))
+    
+    # MACD
+    df['MACD'] = df['Close'].ewm(span=12).mean() - df['Close'].ewm(span=26).mean()
+    df['Signal'] = df['MACD'].ewm(span=9).mean()
+    
+    # 볼린저 밴드 (추가됨)
+    df['MA20'] = df['Close'].rolling(20).mean()
+    df['STD'] = df['Close'].rolling(20).std()
+    df['BB_Low'] = df['MA20'] - (df['STD'] * 2)
+    
+    return df
 
-def calculate_macd(series):
-    exp1 = series.ewm(span=12, adjust=False).mean()
-    exp2 = series.ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    return macd, macd.ewm(span=9, adjust=False).mean()
-
-def get_comprehensive_data(s, t_obj):
-    analysis = {"sentiment": "중립", "earnings": "안정", "option": "중립", "score": 0}
+def get_market_status():
+    """VIX 및 QQQ 변동성 체크"""
     try:
+        vix = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
+        qqq = yf.download("QQQ", period="2d", progress=False)
+        change = ((qqq['Close'].iloc[-1] / qqq['Close'].iloc[-2]) - 1) * 100
+        return vix, change
+    except: return 20, 0
+
+def get_external_data(s, t_obj, curr_p):
+    data = {"sentiment": "중립", "earnings": "안정", "target": 0, "upside": 0, "score": 0}
+    try:
+        # 1. AI 뉴스 분석
         news = t_obj.news[:3]
         if news and GEMINI_API_KEY:
             titles = [n['title'] for n in news]
-            prompt = f"Analyze stock {s}: {titles}. Respond ONLY with one word: Positive, Negative, or Neutral."
+            prompt = f"Stock {s}: {titles}. Respond Positive/Negative/Neutral only."
             res = model.generate_content(prompt).text.strip().capitalize()
-            analysis["sentiment"] = "호재" if "Positive" in res else "악재" if "Negative" in res else "중립"
-            if analysis["sentiment"] == "호재": analysis["score"] += 20
-    except: pass
-    try:
+            data["sentiment"] = "호재" if "Positive" in res else "악재" if "Negative" in res else "중립"
+            if data["sentiment"] == "호재": data["score"] += 20
+        
+        # 2. 애널리스트 목표가
+        info = t_obj.info
+        target = info.get('targetMeanPrice', 0)
+        if target > 0:
+            data["target"] = target
+            data["upside"] = ((target / curr_p) - 1) * 100
+            if data["upside"] > 15: data["score"] += 15
+
+        # 3. 실적 발표일
         cal = t_obj.calendar
         e_date = cal['Earnings Date'][0] if isinstance(cal, dict) else cal.iloc[0][0]
-        # 시간대 에러 방지 (둘 다 naive로 변환)
         days = (pd.to_datetime(e_date).replace(tzinfo=None) - datetime.now().replace(tzinfo=None)).days
         if 0 <= days <= 7: 
-            analysis["earnings"] = f"⚠️D-{days}"
-            analysis["score"] -= 40
+            data["earnings"] = f"⚠️D-{days}"
+            data["score"] -= 40
     except: pass
-    try:
-        opt_info = t_obj.option_chain(t_obj.options[0])
-        pc_ratio = opt_info.puts['volume'].sum() / opt_info.calls['volume'].sum()
-        analysis["option"] = "상승베팅" if pc_ratio < 0.7 else "하락베팅" if pc_ratio > 1.3 else "중립"
-        if pc_ratio < 0.7: analysis["score"] += 15
-    except: pass
-    return analysis
+    return data
 
-def run_analysis():
-    print("🚀 Full-Scan Analysis started...")
+# [4. 메인 분석 엔진]
+def run_full_scan():
+    print("🚀 NASDAQ Master-Quant System Starting...")
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
     
-    market_df = flatten_df(yf.download("QQQ", period="5d", progress=False))
-    market_recovery = (market_df['Close'].iloc[-1] > market_df['Close'].iloc[-2]) if not market_df.empty else False
+    vix, m_perf = get_market_status()
+    risk_mode = "⚠️방어운전" if vix > 24 or m_perf < -1.5 else "✅안정적"
+    score_min = 45 if risk_mode == "⚠️방어운전" else 30
     
-    review_reports, super_buys, strong_buys, normal_buys, trade_logs = [], [], [], [], []
-    total_analyzed, down_count = 0, 0
+    review_list, super_buys, strong_buys, normal_buys = [], [], [], []
+    sector_momentum = {k: 0 for k in SECTORS.keys()}
+    results = []
 
     for idx, s in enumerate(STOCKS):
         print(f"[{idx+1}/{len(STOCKS)}] {s}", end='\r')
         try:
             t_obj = yf.Ticker(s)
-            df = flatten_df(t_obj.history(period="60d"))
+            df = flatten_df(t_obj.history(period="100d"))
             if len(df) < 30: continue
             
-            recent = t_obj.history(period="1d", interval="1m")
-            curr_p = float(recent['Close'].iloc[-1]) if not recent.empty else float(df['Close'].iloc[-1])
-            total_analyzed += 1
+            df = calculate_indicators(df)
+            curr_p = float(df['Close'].iloc[-1])
             
-            # [수정] 복기 로직 통합 (어제 RSI 36 미만 종목의 성적 체크)
-            rsi_series = calculate_rsi(df['Close'])
-            if len(rsi_series) > 1 and rsi_series.iloc[-2] < 36:
-                high_today = float(df['High'].iloc[-1])
-                prev_close = float(df['Close'].iloc[-2])
-                hit = high_today >= prev_close * 1.025 # 어제 종가 대비 2.5% 이상 상승 시 성공
-                review_reports.append(f"{s}:{'🎯' if hit else '⏳'}")
+            # 복기 로직
+            if df['RSI'].iloc[-2] < 35:
+                hit = df['High'].iloc[-1] >= df['Close'].iloc[-2] * 1.025
+                review_list.append(f"{s}:{'🎯' if hit else '⏳'}")
 
-            # 기술 지표
-            ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-            if curr_p < ma20: down_count += 1
-            mfi = float(calculate_mfi(df).iloc[-1])
-            macd, signal = calculate_macd(df['Close'])
-            is_oversold = rsi_series.iloc[-1] < 36 or curr_p <= (ma20 - (df['Close'].rolling(20).std().iloc[-1] * 2))
-            is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
-            is_vol_spike = float(df['Volume'].iloc[-1]) > float(df['Volume'].rolling(5).mean().iloc[-1]) * 1.2
+            # 기술적 판단
+            high_52 = df['High'].max()
+            drop_rate = (1 - (curr_p / high_52)) * 100
+            is_turning = df['MACD'].iloc[-1] > df['Signal'].iloc[-1]
+            is_vol = df['Volume'].iloc[-1] > df['Volume'].rolling(5).mean().iloc[-1] * 1.5
+            is_bb_support = curr_p <= df['BB_Low'].iloc[-1] * 1.02 # BB 하단 근접 (추가)
             
-            extra = get_comprehensive_data(s, t_obj)
-            total_score = extra['score'] + (20 if is_oversold else 0) + (10 if is_turning else 0) + (10 if is_vol_spike else 0)
+            external = get_external_data(s, t_obj, curr_p)
             
-            # ATR 기반 목표가
-            atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-            t1_p, t2_p, stop_p = curr_p + (atr * 1.5), curr_p + (atr * 3.0), curr_p - (atr * 1.0)
-            
-            toss_link = f"https://tossinvest.com/stocks/{s}"
-            t_info = (f"🔥 **`{s}`** (점수:{total_score})\n📍 Buy: ${curr_p:.2f} (RSI:{rsi_series.iloc[-1]:.1f})\n"
-                      f"🎯 Target: ${t1_p:.2f} / ${t2_p:.2f}\n🛑 Stop: ${stop_p:.2f}\n"
-                      f"📊 뉴스:{extra['sentiment']} | 실적:{extra['earnings']} | 옵션:{extra['option']}\n"
-                      f"🔗 [주문하기]({toss_link})")
+            # 주도 섹터 수급 체크
+            if is_vol and curr_p > df['Close'].iloc[-2]:
+                for s_name, stocks in SECTORS.items():
+                    if s in stocks: sector_momentum[s_name] += 1
 
-            if "⚠️" in extra['earnings']: continue
-            
-            if is_oversold and mfi < 40 and is_turning and is_vol_spike and market_recovery and total_score > 30:
-                super_buys.append(t_info)
-                trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": s, "목표가달성": "ING"})
-            elif is_oversold and (mfi < 40 or is_turning) and (is_vol_spike or total_score > 20):
-                strong_buys.append(t_info)
-            elif is_oversold or total_score > 50:
-                normal_buys.append(t_info)
-            
-            time.sleep(0.4) # API 속도 최적화
+            results.append({
+                "symbol": s, "price": curr_p, "rsi": df['RSI'].iloc[-1], "mfi": df['MFI'].iloc[-1],
+                "drop": drop_rate, "is_turning": is_turning, "is_vol": is_vol, "is_bb": is_bb_support,
+                "external": external, "df": df
+            })
+            time.sleep(0.2)
         except: continue
 
-    # 결과 전송
-    ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
-    mode_str = "🚀 불장" if ratio < 0.3 else "📈 보통" if ratio < 0.6 else "⚠️ 하락"
+    # 가점 및 최종 분류
+    hot_sectors = [k for k, v in sector_momentum.items() if v >= 2]
     
-    report = [
-        f"🇺🇸 *NASDAQ PRO AI (Full-Scan)*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
-        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:15]) if review_reports else "- 분석 데이터 없음"), "━━━━━━━━━━━━━━",
-        f"🎯 **[SUPER BUY]**\n" + ("\n\n".join(super_buys[:5]) if super_buys else "- 없음"),
-        f"\n💎 **[STRONG BUY]**\n" + ("\n\n".join(strong_buys[:7]) if strong_buys else "- 없음"),
-        f"\n🔍 **[NORMAL BUY]**\n" + ("\n\n".join(normal_buys[:10]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
-        f"✅ {total_analyzed}개 분석 (시장점수: {int((1-ratio)*100)}점)"
+    for item in results:
+        s = item['symbol']
+        theme_bonus = 15 if any(s in SECTORS[hs] for hs in hot_sectors) else 0
+        
+        # 종합 스코어링 (모든 철학 통합)
+        total_score = item['external']['score'] + theme_bonus + \
+                      (25 if item['rsi'] < 35 else 0) + \
+                      (10 if item['is_turning'] else 0) + \
+                      (15 if item['is_vol'] else 0) + \
+                      (10 if item['drop'] > 30 else 0) + \
+                      (10 if item['is_bb'] else 0)
+
+        # ATR 변동성 손절가
+        atr = (item['df']['High'] - item['df']['Low']).rolling(14).mean().iloc[-1]
+        t1, t2, stop = item['price'] + (atr * 2), item['price'] + (atr * 4), item['price'] - (atr * 1.5)
+        
+        t_link = f"https://tossinvest.com/stocks/{s}"
+        msg = (f"🔥 **`{s}`** (점수:{total_score})\n"
+               f"📍 Buy: ${item['price']:.2f} (RSI:{item['rsi']:.1f})\n"
+               f"🎯 Target: ${t1:.2f} / ${t2:.2f} | 🛑 Stop: ${stop:.2f}\n"
+               f"📊 뉴스:{item['external']['sentiment']} | 낙폭:{item['drop']:.1f}% | 업사이드:{item['external']['upside']:.1f}%\n"
+               f"🏛 실적:{item['external']['earnings']} | [주문하기]({t_link})")
+
+        if "⚠️" in item['external']['earnings']: continue
+        
+        if total_score >= 70 and item['is_vol'] and risk_mode == "✅안정적":
+            super_buys.append(msg)
+        elif total_score >= 55:
+            strong_buys.append(msg)
+        elif total_score >= score_min:
+            normal_buys.append(msg)
+
+    # 전송 레이아웃
+    header = [
+        f"🇺🇸 *NASDAQ PRO MASTER REPORT*",
+        f"📅 {now.strftime('%m-%d %H:%M')} | {risk_mode}",
+        f"📉 VIX: {vix:.2f} | Mkt: {m_perf:+.2f}%",
+        f"🚩 Hot Sectors: {', '.join(hot_sectors) if hot_sectors else '중립'}",
+        "━━━━━━━━━━━━━━",
+        f"📊 **[전일 복기]**\n" + (", ".join(review_list[:12]) if review_list else "-"),
+        "━━━━━━━━━━━━━━"
     ]
     
-    full_text = "\n".join(report)
+    full_text = "\n".join(header + 
+                ([f"🎯 **[SUPER BUY]**\n" + "\n\n".join(super_buys[:3])] if super_buys else []) +
+                ([f"\n💎 **[STRONG BUY]**\n" + "\n\n".join(strong_buys[:5])] if strong_buys else []) +
+                ([f"\n🔍 **[NORMAL BUY]**\n" + "\n\n".join(normal_buys[:8])] if normal_buys else []) +
+                ["━━━━━━━━━━━━━━", f"✅ {len(results)}개 전수조사 완료"])
+
     for part in [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": part, "parse_mode": "Markdown", "disable_web_page_preview": True})
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                      json={"chat_id": CHAT_ID, "text": part, "parse_mode": "Markdown", "disable_web_page_preview": True})
 
 if __name__ == "__main__":
-    run_analysis()
-
+    run_full_scan()
 
 
 
