@@ -2,14 +2,13 @@ import os
 import yfinance as yf
 import pandas as pd
 import requests
-import json
 import time
 from datetime import datetime
 import pytz
 import google.generativeai as genai
 
 # ==========================================
-# 1. 환경 설정 및 종목 리스트 (100개 튜플)
+# 1. 환경 설정 및 종목 리스트 (100개)
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
@@ -42,15 +41,15 @@ KR_STOCKS = [
     ("바이오니아", "064550.KQ"), ("STX", "011810.KS"), ("한화오션", "042660.KS"), ("LS", "006260.KS"), ("LS ELECTRIC", "010120.KS")
 ]
 
-# --- 헬퍼 함수 ---
+# --- 기술 분석 함수 ---
 def flatten_df(df):
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     return df
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
     return 100 - (100 / (1 + (gain / loss)))
 
 def calculate_mfi(df, period=14):
@@ -60,119 +59,107 @@ def calculate_mfi(df, period=14):
     neg_f = mf.where(tp < tp.shift(1), 0).rolling(period).sum()
     return 100 - (100 / (1 + (pos_f / neg_f)))
 
-def calculate_macd(series):
-    exp1 = series.ewm(span=12, adjust=False).mean()
-    exp2 = series.ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    return macd, macd.ewm(span=9, adjust=False).mean()
-
-def get_ai_sentiment(s_name, t_obj):
-    """지표가 좋은 종목에 대해서만 선별적으로 AI 뉴스 분석 실행"""
+def get_ai_analysis(s_name, t_obj):
     if not GEMINI_API_KEY: return "중립", 0
     try:
-        news = t_obj.news[:3]
-        if not news: return "데이터없음", 0
-        titles = [n['title'] for n in news]
-        prompt = f"Analyze Korean stock '{s_name}' based on news titles: {titles}. Respond ONLY with: Positive, Negative, or Neutral."
-        res = model.generate_content(prompt).text.strip().capitalize()
+        news_list = t_obj.news
+        if not news_list: return "정보부족", 0
+        titles = [n['title'] for n in news_list[:5]]
+        prompt = f"Stock: {s_name}. News: {titles}. 긍정이면 Positive, 부정이면 Negative, 판단불가면 Neutral. 한 단어만 답해."
+        response = model.generate_content(prompt)
+        res = response.text.strip().capitalize()
         if "Positive" in res: return "호재", 20
         if "Negative" in res: return "악재", -20
         return "중립", 0
-    except: return "에러", 0
+    except: return "중립", 0
 
-# --- 실행 함수 ---
+# --- 메인 실행부 ---
 def run_analysis_kr():
-    print(f"🚀 KOREA Stock Analysis (100개) 시작...")
+    print(f"🚀 국장 전수 조사(100개) 시작...")
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
     
-    # 지수 확인 (코스피)
     market_df = flatten_df(yf.download("^KS11", period="5d", progress=False))
     market_recovery = (market_df['Close'].iloc[-1] > market_df['Close'].iloc[-2]) if not market_df.empty else False
     
-    review_reports, super_buys, strong_buys, normal_buys = [], [], [], []
+    super_buys, strong_buys, normal_buys = [], [], []
     total_analyzed, down_count = 0, 0
 
-    for idx, (s_name, s_code) in enumerate(KR_STOCKS):
-        print(f"[{idx+1}/{len(KR_STOCKS)}] {s_name} 분석 중...", end='\r')
+    for s_name, s_code in KR_STOCKS:
         try:
             t_obj = yf.Ticker(s_code)
             df = flatten_df(t_obj.history(period="60d"))
-            if len(df) < 30: continue
+            if len(df) < 20: continue
             
-            # 실시간 가격 (1분봉 시도, 안되면 일봉)
             recent = t_obj.history(period="1d", interval="1m")
             curr_p = float(recent['Close'].iloc[-1]) if not recent.empty else float(df['Close'].iloc[-1])
             total_analyzed += 1
             
-            # 1. 전일 복기 (RSI 36 미만 종목이 오늘 2% 올랐는가)
-            rsi_series = calculate_rsi(df['Close'])
-            if len(rsi_series) > 1 and rsi_series.iloc[-2] < 36:
-                hit = float(df['High'].iloc[-1]) >= float(df['Close'].iloc[-2]) * 1.02
-                review_reports.append(f"{s_name}:{'🎯' if hit else '⏳'}")
-
-            # 2. 기술적 지표 계산
+            # 1. 기술 지표 및 수급(MFI)
+            rsi = calculate_rsi(df['Close']).iloc[-1]
+            mfi = calculate_mfi(df).iloc[-1]
             ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
             if curr_p < ma20: down_count += 1
-            mfi = float(calculate_mfi(df).iloc[-1])
-            macd, signal = calculate_macd(df['Close'])
             
-            is_oversold = rsi_series.iloc[-1] < 36 or curr_p <= (ma20 - (df['Close'].rolling(20).std().iloc[-1] * 2))
-            is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
-            is_vol_spike = float(df['Volume'].iloc[-1]) > float(df['Volume'].rolling(5).mean().iloc[-1]) * 1.2
+            supply_status = "보통"; supply_score = 0
+            if mfi < 25: supply_status = "매수세유입"; supply_score = 15
+            elif mfi > 75: supply_status = "과열(차익)"; supply_score = -10
             
-            # 3. 선별적 AI 분석 (지표가 좋을 때만 실행하여 속도와 API 보호)
+            # 2. 선별 뉴스 분석
             sentiment, ai_score = "중립", 0
-            if is_oversold or is_turning or is_vol_spike:
-                sentiment, ai_score = get_ai_sentiment(s_name, t_obj)
-                time.sleep(0.5) # Gemini 분당 제한 방지
+            if rsi < 42 or mfi < 30:
+                sentiment, ai_score = get_ai_analysis(s_name, t_obj)
+                time.sleep(0.5)
+
+            # 3. 실적 체크
+            earnings_status = "안정"
+            try:
+                cal = t_obj.calendar
+                e_date = cal['Earnings Date'][0] if isinstance(cal, dict) else cal.iloc[0][0]
+                days = (pd.to_datetime(e_date).replace(tzinfo=None) - datetime.now().replace(tzinfo=None)).days
+                if 0 <= days <= 7: earnings_status = f"⚠️D-{days}"
+            except: pass
+
+            total_score = ai_score + supply_score + (25 if rsi < 35 else 0)
             
-            total_score = ai_score + (20 if is_oversold else 0) + (10 if is_turning else 0) + (10 if is_vol_spike else 0)
-            
-            # ATR 목표가 (국장 맞춤형 1.2/2.5배)
+            # 4. 목표가/손절가 (국장 맞춤 ATR)
             atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-            t1_p, t2_p = curr_p + (atr * 1.2), curr_p + (atr * 2.5)
+            t1_p, t2_p, stop_p = curr_p + (atr * 1.5), curr_p + (atr * 3.0), curr_p - (atr * 1.2)
             
             toss_link = f"https://tossinvest.com/stocks/{s_code.split('.')[0]}"
-            t_info = (f"🇰🇷 **`{s_name}`** ({total_score}점)\n📍 {int(curr_p):,}원 (RSI:{rsi_series.iloc[-1]:.1f})\n"
-                      f"🎯 목표: {int(t1_p):,} / {int(t2_p):,}원\n📊 뉴스:{sentiment}\n🔗 [토스주문]({toss_link})")
-
-            # 4. 등급 판정
-            if is_oversold and mfi < 40 and is_turning and is_vol_spike and market_recovery:
-                super_buys.append(t_info)
-            elif is_oversold and (mfi < 40 or is_turning) and (is_vol_spike or total_score >= 20):
-                strong_buys.append(t_info)
-            elif is_oversold or total_score >= 40:
-                normal_buys.append(t_info)
             
-            time.sleep(0.1) 
-        except Exception as e:
-            continue
+            # [미장과 동일 포맷]
+            t_info = (f"🔥 **{s_name}** (점수:{total_score})\n"
+                      f"📍 Buy: {int(curr_p):,}원 (RSI:{rsi:.1f})\n"
+                      f"🎯 Target: {int(t1_p):,} / {int(t2_p):,}원\n"
+                      f"🛑 Stop: {int(stop_p):,}원\n"
+                      f"📊 뉴스:{sentiment} | 실적:{earnings_status} | 수급:{supply_status}\n"
+                      f"🔗 [주문하기]({toss_link})")
 
-    # 5. 결과 리포트 전송
+            if total_score >= 45 and market_recovery: super_buys.append(t_info)
+            elif total_score >= 25: strong_buys.append(t_info)
+            elif rsi < 33: normal_buys.append(t_info)
+            
+            time.sleep(0.05)
+        except: continue
+
+    # 5. 분할 리포트 발송
     ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
-    mode_str = "🚀 강세" if ratio < 0.3 else "📈 보통" if ratio < 0.6 else "⚠️ 약세"
+    mode_str = "🚀 불장" if ratio < 0.3 else "📈 보통" if ratio < 0.6 else "⚠️ 하락"
+    header = f"🇰🇷 *KOREA STOCK PRO AI*\n📅 {now.strftime('%m-%d %H:%M')} | {mode_str}\n━━━━━━━━━━━━━━"
     
-    header = f"🇰🇷 *KOREA STOCK PRO AI*\n📅 {now.strftime('%m-%d %H:%M')} | {mode_str}\n━━━━━━━━━━━━━━\n📊 **[전일 복기]**\n" + (", ".join(review_reports[:12]) if review_reports else "-") + "\n━━━━━━━━━━━━━━"
-    
-    # 메시지 전송 로직 (슈퍼/스트롱/노멀 순서로 분할 전송)
-    def send_msg(text):
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown", "disable_web_page_preview": True})
+    def send(msg): requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True})
 
-    send_msg(header)
-    
-    if super_buys: send_msg("🎯 **[SUPER BUY]**\n\n" + "\n\n".join(super_buys))
+    send(header)
+    if super_buys: send("🎯 **[SUPER BUY]**\n\n" + "\n\n".join(super_buys[:5]))
     if strong_buys: 
         for i in range(0, len(strong_buys), 5):
-            send_msg("💎 **[STRONG BUY]**\n\n" + "\n\n".join(strong_buys[i:i+5]))
+            send("💎 **[STRONG BUY]**\n\n" + "\n\n".join(strong_buys[i:i+5]))
     if normal_buys:
         for i in range(0, len(normal_buys), 5):
-            send_msg("🔍 **[NORMAL BUY]**\n\n" + "\n\n".join(normal_buys[i:i+5]))
-
-    print("\n✅ 분석 완료 및 전송 성공.")
+            send("🔍 **[NORMAL BUY]**\n\n" + "\n\n".join(normal_buys[i:i+5]))
 
 if __name__ == "__main__":
     run_analysis_kr()
-
 
 
