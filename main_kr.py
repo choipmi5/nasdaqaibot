@@ -8,7 +8,7 @@ import pytz
 import google.generativeai as genai
 
 # ==========================================
-# 1. 환경 설정 및 종목 리스트 (100개)
+# 1. 환경 설정 및 종목 리스트 (100개 전수 포함)
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
@@ -41,7 +41,7 @@ KR_STOCKS = [
     ("바이오니아", "064550.KQ"), ("STX", "011810.KS"), ("한화오션", "042660.KS"), ("LS", "006260.KS"), ("LS ELECTRIC", "010120.KS")
 ]
 
-# --- 기술 분석 함수 ---
+# --- 기술 분석 헬퍼 함수 ---
 def flatten_df(df):
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     return df
@@ -73,17 +73,18 @@ def get_ai_analysis(s_name, t_obj):
         return "중립", 0
     except: return "중립", 0
 
-# --- 메인 실행부 ---
+# --- 메인 로직 ---
 def run_analysis_kr():
-    print(f"🚀 국장 전수 조사(100개) 시작...")
+    print(f"🚀 국장 예민한 수급 엔진 가동 (100개 종목)...")
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
     
+    # 시장 지수 확인 (반등장인지 확인)
     market_df = flatten_df(yf.download("^KS11", period="5d", progress=False))
     market_recovery = (market_df['Close'].iloc[-1] > market_df['Close'].iloc[-2]) if not market_df.empty else False
     
     super_buys, strong_buys, normal_buys = [], [], []
-    total_analyzed, down_count = 0, 0
+    total_analyzed = 0
 
     for s_name, s_code in KR_STOCKS:
         try:
@@ -95,23 +96,28 @@ def run_analysis_kr():
             curr_p = float(recent['Close'].iloc[-1]) if not recent.empty else float(df['Close'].iloc[-1])
             total_analyzed += 1
             
-            # 1. 기술 지표 및 수급(MFI)
+            # 1. 예민한 수급 및 기술 지표
             rsi = calculate_rsi(df['Close']).iloc[-1]
             mfi = calculate_mfi(df).iloc[-1]
-            ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
-            if curr_p < ma20: down_count += 1
+            vol_ma = df['Volume'].rolling(5).mean().iloc[-1]
+            is_high_volume = df['Volume'].iloc[-1] > vol_ma * 1.3 # 거래량 30% 급증 여부
             
+            # 수급 상태 세분화 (MFI 기준 상향으로 더 예민하게 포착)
             supply_status = "보통"; supply_score = 0
-            if mfi < 25: supply_status = "매수세유입"; supply_score = 15
-            elif mfi > 75: supply_status = "과열(차익)"; supply_score = -10
+            if mfi < 35: # 자금 유입 초기 신호 (매우 예민)
+                supply_status = "🔥강력매수"; supply_score = 25
+            elif mfi < 50 and is_high_volume:
+                supply_status = "수급개선"; supply_score = 15
+            elif mfi > 70:
+                supply_status = "차익경계"; supply_score = -10
             
-            # 2. 선별 뉴스 분석
+            # 2. 선별적 AI 분석 (저점이거나 수급이 들어올 때만)
             sentiment, ai_score = "중립", 0
-            if rsi < 42 or mfi < 30:
+            if rsi < 45 or supply_score > 0:
                 sentiment, ai_score = get_ai_analysis(s_name, t_obj)
-                time.sleep(0.5)
+                time.sleep(0.4) # API 속도 조절
 
-            # 3. 실적 체크
+            # 3. 실적 리스크
             earnings_status = "안정"
             try:
                 cal = t_obj.calendar
@@ -120,15 +126,16 @@ def run_analysis_kr():
                 if 0 <= days <= 7: earnings_status = f"⚠️D-{days}"
             except: pass
 
-            total_score = ai_score + supply_score + (25 if rsi < 35 else 0)
+            # 4. 최종 점수 합산 알고리즘
+            total_score = ai_score + supply_score + (20 if rsi < 35 else 0)
             
-            # 4. 목표가/손절가 (국장 맞춤 ATR)
+            # 5. ATR 기반 목표가/손절가
             atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
             t1_p, t2_p, stop_p = curr_p + (atr * 1.5), curr_p + (atr * 3.0), curr_p - (atr * 1.2)
             
             toss_link = f"https://tossinvest.com/stocks/{s_code.split('.')[0]}"
             
-            # [미장과 동일 포맷]
+            # [출력 포맷 통일]
             t_info = (f"🔥 **{s_name}** (점수:{total_score})\n"
                       f"📍 Buy: {int(curr_p):,}원 (RSI:{rsi:.1f})\n"
                       f"🎯 Target: {int(t1_p):,} / {int(t2_p):,}원\n"
@@ -136,30 +143,34 @@ def run_analysis_kr():
                       f"📊 뉴스:{sentiment} | 실적:{earnings_status} | 수급:{supply_status}\n"
                       f"🔗 [주문하기]({toss_link})")
 
+            # 등급 판정
             if total_score >= 45 and market_recovery: super_buys.append(t_info)
             elif total_score >= 25: strong_buys.append(t_info)
             elif rsi < 33: normal_buys.append(t_info)
             
             time.sleep(0.05)
-        except: continue
+        except Exception as e:
+            continue
 
-    # 5. 분할 리포트 발송
-    ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
-    mode_str = "🚀 불장" if ratio < 0.3 else "📈 보통" if ratio < 0.6 else "⚠️ 하락"
-    header = f"🇰🇷 *KOREA STOCK PRO AI*\n📅 {now.strftime('%m-%d %H:%M')} | {mode_str}\n━━━━━━━━━━━━━━"
-    
+    # 6. 분할 전송 리포트
+    header = f"🇰🇷 *KOREA STOCK QUANT AI*\n📅 {now.strftime('%m-%d %H:%M')}\n━━━━━━━━━━━━━━"
     def send(msg): requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True})
 
     send(header)
-    if super_buys: send("🎯 **[SUPER BUY]**\n\n" + "\n\n".join(super_buys[:5]))
-    if strong_buys: 
+    
+    if super_buys: 
+        send("🎯 **[SUPER BUY]**\n\n" + "\n\n".join(super_buys[:5]))
+    
+    if strong_buys:
         for i in range(0, len(strong_buys), 5):
             send("💎 **[STRONG BUY]**\n\n" + "\n\n".join(strong_buys[i:i+5]))
+            time.sleep(1) # 전송 안정성
+            
     if normal_buys:
         for i in range(0, len(normal_buys), 5):
             send("🔍 **[NORMAL BUY]**\n\n" + "\n\n".join(normal_buys[i:i+5]))
+            time.sleep(1)
 
 if __name__ == "__main__":
     run_analysis_kr()
-
 
