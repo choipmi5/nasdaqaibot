@@ -76,7 +76,8 @@ def get_market_status():
         return 20.0, 0.0
 
 def get_external_data(s, t_obj, curr_p):
-    data = {"sentiment": "중립", "earnings": "안정", "target": 0.0, "upside": 0.0, "score": 0}
+    # upside 기본값을 0.0이 아닌 "N/A"로 설정
+    data = {"sentiment": "중립", "earnings": "안정", "target": None, "upside": "N/A", "score": 0}
     try:
         # 1. AI 뉴스 분석
         news = t_obj.news[:3]
@@ -87,17 +88,19 @@ def get_external_data(s, t_obj, curr_p):
             data["sentiment"] = "호재" if "Positive" in res else "악재" if "Negative" in res else "중립"
             if data["sentiment"] == "호재": data["score"] += 20
         
-        # 2. 애널리스트 목표가
+        # 2. 애널리스트 목표가 (로직 보강)
         info = t_obj.info
-        target = info.get('targetMeanPrice', 0.0)
-        if target and target > 0:
+        target = info.get('targetMeanPrice')
+        
+        if target and float(target) > 0:
             data["target"] = float(target)
             data["upside"] = float(((target / curr_p) - 1) * 100)
             if data["upside"] > 15: data["score"] += 15
+        else:
+            data["upside"] = "N/A" # 데이터가 없으면 N/A 처리
 
         # 3. 실적 발표일
         cal = t_obj.calendar
-        # calendar 구조 변경 대응
         if isinstance(cal, pd.DataFrame) and not cal.empty:
             e_date = cal.iloc[0, 0]
         elif isinstance(cal, dict) and 'Earnings Date' in cal:
@@ -119,10 +122,8 @@ def run_full_scan():
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
     
-    # 지표 값들을 확실히 float로 받음 (에러 발생 지점 수정)
     vix, m_perf = get_market_status()
     
-    # 명시적 float 비교로 ValueError 방지
     is_risky = float(vix) > 24.0 or float(m_perf) < -1.5
     risk_mode = "⚠️방어운전" if is_risky else "✅안정적"
     score_min = 45 if risk_mode == "⚠️방어운전" else 30
@@ -141,12 +142,10 @@ def run_full_scan():
             df = calculate_indicators(df)
             curr_p = float(df['Close'].iloc[-1])
             
-            # 복기 로직
             if df['RSI'].iloc[-2] < 35:
                 hit = float(df['High'].iloc[-1]) >= float(df['Close'].iloc[-2]) * 1.025
                 review_list.append(f"{s}:{'🎯' if hit else '⏳'}")
 
-            # 기술적 판단
             high_52 = float(df['High'].max())
             drop_rate = float((1 - (curr_p / high_52)) * 100)
             is_turning = bool(df['MACD'].iloc[-1] > df['Signal'].iloc[-1])
@@ -155,7 +154,6 @@ def run_full_scan():
             
             external = get_external_data(s, t_obj, curr_p)
             
-            # 주도 섹터 수급 체크
             if is_vol and curr_p > float(df['Close'].iloc[-2]):
                 for s_name, stocks in SECTORS.items():
                     if s in stocks: sector_momentum[s_name] += 1
@@ -170,14 +168,18 @@ def run_full_scan():
             print(f"\nError analyzing {s}: {e}")
             continue
 
-    # 가점 및 최종 분류
     hot_sectors = [k for k, v in sector_momentum.items() if v >= 2]
     
     for item in results:
         s = item['symbol']
         theme_bonus = 15 if any(s in SECTORS[hs] for hs in hot_sectors) else 0
         
-        total_score = item['external']['score'] + theme_bonus + \
+        # ✅ 데이터 누락 보정 로직 (업사이드 데이터가 없고 낙폭이 30% 이상이면 가점 10점 대체 부여)
+        missing_data_bonus = 0
+        if item['external']['upside'] == "N/A" and item['drop'] > 30:
+            missing_data_bonus = 10
+        
+        total_score = item['external']['score'] + theme_bonus + missing_data_bonus + \
                       (25 if item['rsi'] < 35 else 0) + \
                       (10 if item['is_turning'] else 0) + \
                       (15 if item['is_vol'] else 0) + \
@@ -187,11 +189,15 @@ def run_full_scan():
         atr = (item['df']['High'] - item['df']['Low']).rolling(14).mean().iloc[-1]
         t1, t2, stop = item['price'] + (atr * 2), item['price'] + (atr * 4), item['price'] - (atr * 1.5)
         
+        # 문자열 N/A 처리 (에러 방지용 포맷팅)
+        upside_val = item['external']['upside']
+        upside_str = f"{upside_val:.1f}%" if upside_val != "N/A" else "N/A"
+        
         t_link = f"https://tossinvest.com/stocks/{s}"
         msg = (f"🔥 **`{s}`** (점수:{total_score})\n"
                f"📍 Buy: ${item['price']:.2f} (RSI:{item['rsi']:.1f})\n"
                f"🎯 Target: ${t1:.2f} / ${t2:.2f} | 🛑 Stop: ${stop:.2f}\n"
-               f"📊 뉴스:{item['external']['sentiment']} | 낙폭:{item['drop']:.1f}% | 업사이드:{item['external']['upside']:.1f}%\n"
+               f"📊 뉴스:{item['external']['sentiment']} | 낙폭:{item['drop']:.1f}% | 업사이드:{upside_str}\n"
                f"🏛 실적:{item['external']['earnings']} | [주문하기]({t_link})")
 
         if "⚠️" in item['external']['earnings']: continue
@@ -226,6 +232,7 @@ def run_full_scan():
 
 if __name__ == "__main__":
     run_full_scan()
+
 
 
 
