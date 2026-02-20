@@ -58,13 +58,11 @@ def calculate_indicators(df):
     return df
 
 def get_market_status():
-    """VIX 및 QQQ 변동성 체크 (에러 방지 로직 강화)"""
+    """VIX 및 QQQ 변동성 체크"""
     try:
-        # VIX 지수 가져오기
         vix_data = flatten_df(yf.download("^VIX", period="1d", progress=False))
         vix = float(vix_data['Close'].iloc[-1])
         
-        # QQQ 지수 수익률 계산
         qqq_data = flatten_df(yf.download("QQQ", period="2d", progress=False))
         if len(qqq_data) >= 2:
             change = float(((qqq_data['Close'].iloc[-1] / qqq_data['Close'].iloc[-2]) - 1) * 100)
@@ -76,7 +74,6 @@ def get_market_status():
         return 20.0, 0.0
 
 def get_external_data(s, t_obj, curr_p):
-    # upside 기본값을 0.0이 아닌 "N/A"로 설정
     data = {"sentiment": "중립", "earnings": "안정", "target": None, "upside": "N/A", "score": 0}
     try:
         # 1. AI 뉴스 분석
@@ -88,16 +85,16 @@ def get_external_data(s, t_obj, curr_p):
             data["sentiment"] = "호재" if "Positive" in res else "악재" if "Negative" in res else "중립"
             if data["sentiment"] == "호재": data["score"] += 20
         
-        # 2. 애널리스트 목표가 (로직 보강)
+        # 2. 애널리스트 목표가 (다중 백업 로직)
         info = t_obj.info
-        target = info.get('targetMeanPrice')
+        target = info.get('targetMeanPrice') or info.get('targetMedianPrice') or info.get('targetHighPrice')
         
         if target and float(target) > 0:
             data["target"] = float(target)
             data["upside"] = float(((target / curr_p) - 1) * 100)
             if data["upside"] > 15: data["score"] += 15
         else:
-            data["upside"] = "N/A" # 데이터가 없으면 N/A 처리
+            data["upside"] = "N/A"
 
         # 3. 실적 발표일
         cal = t_obj.calendar
@@ -174,7 +171,6 @@ def run_full_scan():
         s = item['symbol']
         theme_bonus = 15 if any(s in SECTORS[hs] for hs in hot_sectors) else 0
         
-        # ✅ 데이터 누락 보정 로직 (업사이드 데이터가 없고 낙폭이 30% 이상이면 가점 10점 대체 부여)
         missing_data_bonus = 0
         if item['external']['upside'] == "N/A" and item['drop'] > 30:
             missing_data_bonus = 10
@@ -189,16 +185,20 @@ def run_full_scan():
         atr = (item['df']['High'] - item['df']['Low']).rolling(14).mean().iloc[-1]
         t1, t2, stop = item['price'] + (atr * 2), item['price'] + (atr * 4), item['price'] - (atr * 1.5)
         
-        # 문자열 N/A 처리 (에러 방지용 포맷팅)
         upside_val = item['external']['upside']
         upside_str = f"{upside_val:.1f}%" if upside_val != "N/A" else "N/A"
+        
+        # 메시지 옵션 상태 텍스트
+        bb_status = "🌕하단" if item['is_bb'] else "🌑정상"
+        vol_status = "🔥폭발" if item['is_vol'] else "💤보통"
         
         t_link = f"https://tossinvest.com/stocks/{s}"
         msg = (f"🔥 **`{s}`** (점수:{total_score})\n"
                f"📍 Buy: ${item['price']:.2f} (RSI:{item['rsi']:.1f})\n"
                f"🎯 Target: ${t1:.2f} / ${t2:.2f} | 🛑 Stop: ${stop:.2f}\n"
                f"📊 뉴스:{item['external']['sentiment']} | 낙폭:{item['drop']:.1f}% | 업사이드:{upside_str}\n"
-               f"🏛 실적:{item['external']['earnings']} | [주문하기]({t_link})")
+               f"🚩 수급:{vol_status} | BB지수:{bb_status} | 🏛 실적:{item['external']['earnings']}\n"
+               f"🔗 [주문하기]({t_link})")
 
         if "⚠️" in item['external']['earnings']: continue
         
@@ -209,7 +209,6 @@ def run_full_scan():
         elif total_score >= score_min:
             normal_buys.append(msg)
 
-    # 전송 레이아웃
     header = [
         f"🇺🇸 *NASDAQ PRO MASTER REPORT*",
         f"📅 {now.strftime('%m-%d %H:%M')} | {risk_mode}",
