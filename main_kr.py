@@ -3,12 +3,13 @@ import yfinance as yf
 import pandas as pd
 import requests
 import time
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 import pytz
 import google.generativeai as genai
 
 # ==========================================
-# 1. 환경 설정 및 종목 리스트 (100개 전수 포함)
+# 1. 환경 설정 및 종목 리스트 (100개 유지)
 # ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
@@ -17,6 +18,16 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
     model = genai.GenerativeModel('gemini-1.5-flash')
+
+# (SECTORS 및 KR_STOCKS 리스트는 기존과 동일하게 유지됩니다)
+SECTORS = {
+    "반도체": ["005930.KS", "000660.KS", "058470.KQ", "403870.KQ", "399720.KQ", "394280.KQ", "080220.KQ"],
+    "바이오": ["207940.KS", "068270.KS", "191150.KQ", "028300.KQ", "068760.KQ", "145020.KQ", "000100.KS"],
+    "2차전지": ["373220.KS", "051910.KS", "006400.KS", "247540.KQ", "086520.KQ", "348370.KQ", "003670.KS"],
+    "자동차": ["005380.KS", "000270.KS", "012330.KS", "086280.KS", "018880.KS"],
+    "금융/지주": ["105560.KS", "055550.KS", "086790.KS", "138040.KS", "000810.KS", "032830.KS", "003550.KS", "034730.KS"],
+    "엔터/게임": ["352820.KS", "259960.KS", "041510.KQ", "035900.KQ", "251270.KS", "036570.KS", "112040.KQ", "078340.KQ"]
+}
 
 KR_STOCKS = [
     ("삼성전자", "005930.KS"), ("SK하이닉스", "000660.KS"), ("LG엔솔", "373220.KS"), ("삼성바이오", "207940.KS"), ("현대차", "005380.KS"),
@@ -41,7 +52,7 @@ KR_STOCKS = [
     ("바이오니아", "064550.KQ"), ("STX", "011810.KS"), ("한화오션", "042660.KS"), ("LS", "006260.KS"), ("LS ELECTRIC", "010120.KS")
 ]
 
-# --- 기술 분석 헬퍼 함수 ---
+# --- 기술 분석 및 리포트 유틸리티 ---
 def flatten_df(df):
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     return df
@@ -59,13 +70,23 @@ def calculate_mfi(df, period=14):
     neg_f = mf.where(tp < tp.shift(1), 0).rolling(period).sum()
     return 100 - (100 / (1 + (pos_f / neg_f)))
 
+def get_analyst_consensus(t_obj):
+    """증권사 리포트 연동: 목표가 및 투자의견 추출"""
+    try:
+        info = t_obj.info
+        target_p = info.get('targetMeanPrice', 0)
+        recommend = info.get('recommendationKey', 'none').replace('_', ' ').capitalize()
+        return target_p, recommend
+    except:
+        return 0, "N/A"
+
 def get_ai_analysis(s_name, t_obj):
     if not GEMINI_API_KEY: return "중립", 0
     try:
         news_list = t_obj.news
         if not news_list: return "정보부족", 0
         titles = [n['title'] for n in news_list[:5]]
-        prompt = f"Stock: {s_name}. News: {titles}. 긍정이면 Positive, 부정이면 Negative, 판단불가면 Neutral. 한 단어만 답해."
+        prompt = f"Stock: {s_name}. News: {titles}. Positive, Negative, or Neutral? Reply with ONE word."
         response = model.generate_content(prompt)
         res = response.text.strip().capitalize()
         if "Positive" in res: return "호재", 20
@@ -73,104 +94,126 @@ def get_ai_analysis(s_name, t_obj):
         return "중립", 0
     except: return "중립", 0
 
-# --- 메인 로직 ---
-def run_analysis_kr():
-    print(f"🚀 국장 예민한 수급 엔진 가동 (100개 종목)...")
+def get_yesterday_backtest():
+    try:
+        m_df = flatten_df(yf.download("^KS11", period="5d", progress=False))
+        if len(m_df) < 2: return 0.0
+        change = ((m_df['Close'].iloc[-1] / m_df['Close'].iloc[-2]) - 1) * 100
+        return change
+    except: return 0.0
+
+# --- 메인 실행 엔진 ---
+def run_full_pro_system():
+    print("🚀 국장 PRO 퀀트 시스템(리포트 연동형) 가동 중...")
     if not TELEGRAM_TOKEN or not CHAT_ID: return
     kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
     
-    # 시장 지수 확인 (반등장인지 확인)
-    market_df = flatten_df(yf.download("^KS11", period="5d", progress=False))
-    market_recovery = (market_df['Close'].iloc[-1] > market_df['Close'].iloc[-2]) if not market_df.empty else False
+    y_perf = get_yesterday_backtest()
+    risk_mode = "⚠️방어운전" if y_perf < -1.0 else "✅안정적"
+    score_threshold = 45 if y_perf < -0.5 else 30
     
-    super_buys, strong_buys, normal_buys = [], [], []
-    total_analyzed = 0
+    analysis_results = []
+    sector_momentum = {name: 0 for name in SECTORS.keys()}
 
     for s_name, s_code in KR_STOCKS:
         try:
             t_obj = yf.Ticker(s_code)
-            df = flatten_df(t_obj.history(period="60d"))
+            df = flatten_df(t_obj.history(period="100d"))
             if len(df) < 20: continue
             
-            recent = t_obj.history(period="1d", interval="1m")
-            curr_p = float(recent['Close'].iloc[-1]) if not recent.empty else float(df['Close'].iloc[-1])
-            total_analyzed += 1
-            
-            # 1. 예민한 수급 및 기술 지표
+            curr_p = float(df['Close'].iloc[-1])
             rsi = calculate_rsi(df['Close']).iloc[-1]
             mfi = calculate_mfi(df).iloc[-1]
-            vol_ma = df['Volume'].rolling(5).mean().iloc[-1]
-            is_high_volume = df['Volume'].iloc[-1] > vol_ma * 1.3 # 거래량 30% 급증 여부
+            high_52 = df['High'].max()
+            drop_rate = (1 - (curr_p / high_52)) * 100
             
-            # 수급 상태 세분화 (MFI 기준 상향으로 더 예민하게 포착)
-            supply_status = "보통"; supply_score = 0
-            if mfi < 35: # 자금 유입 초기 신호 (매우 예민)
-                supply_status = "🔥강력매수"; supply_score = 25
-            elif mfi < 50 and is_high_volume:
-                supply_status = "수급개선"; supply_score = 15
-            elif mfi > 70:
-                supply_status = "차익경계"; supply_score = -10
+            # 수급 엔진
+            vol_spike = df['Volume'].iloc[-1] > df['Volume'].rolling(10).mean().iloc[-1] * 1.8
+            price_up = df['Close'].iloc[-1] > df['Close'].iloc[-2]
             
-            # 2. 선별적 AI 분석 (저점이거나 수급이 들어올 때만)
-            sentiment, ai_score = "중립", 0
-            if rsi < 45 or supply_score > 0:
-                sentiment, ai_score = get_ai_analysis(s_name, t_obj)
-                time.sleep(0.4) # API 속도 조절
+            supply_tag = "보통"; s_score = 0
+            if vol_spike and price_up and mfi < 50:
+                supply_tag = "💎양매수포착"; s_score = 35
+            elif mfi < 30:
+                supply_tag = "🔥저점매집"; s_score = 25
+            
+            if s_score > 0:
+                for s_tile, codes in SECTORS.items():
+                    if s_code in codes: sector_momentum[s_tile] += 1
 
-            # 3. 실적 리스크
-            earnings_status = "안정"
+            # [증권사 리포트 연동 추가]
+            broker_target, broker_opinion = get_analyst_consensus(t_obj)
+            broker_upside = ((broker_target / curr_p) - 1) * 100 if broker_target > 0 else 0
+            
+            # 리포트 가점: 목표가가 현재가보다 20% 이상 높고 투자의견이 좋을 때
+            broker_bonus = 15 if broker_upside > 20 and "Buy" in broker_opinion else 0
+
+            # 실적 정보
+            e_status = "안정"
             try:
                 cal = t_obj.calendar
                 e_date = cal['Earnings Date'][0] if isinstance(cal, dict) else cal.iloc[0][0]
                 days = (pd.to_datetime(e_date).replace(tzinfo=None) - datetime.now().replace(tzinfo=None)).days
-                if 0 <= days <= 7: earnings_status = f"⚠️D-{days}"
+                if 0 <= days <= 7: e_status = f"⚠️D-{days}"
             except: pass
 
-            # 4. 최종 점수 합산 알고리즘
-            total_score = ai_score + supply_score + (20 if rsi < 35 else 0)
-            
-            # 5. ATR 기반 목표가/손절가
-            atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
-            t1_p, t2_p, stop_p = curr_p + (atr * 1.5), curr_p + (atr * 3.0), curr_p - (atr * 1.2)
-            
-            toss_link = f"https://tossinvest.com/stocks/{s_code.split('.')[0]}"
-            
-            # [출력 포맷 통일]
-            t_info = (f"🔥 **{s_name}** (점수:{total_score})\n"
-                      f"📍 Buy: {int(curr_p):,}원 (RSI:{rsi:.1f})\n"
-                      f"🎯 Target: {int(t1_p):,} / {int(t2_p):,}원\n"
-                      f"🛑 Stop: {int(stop_p):,}원\n"
-                      f"📊 뉴스:{sentiment} | 실적:{earnings_status} | 수급:{supply_status}\n"
-                      f"🔗 [주문하기]({toss_link})")
+            analysis_results.append({
+                "name": s_name, "code": s_code, "price": curr_p, "rsi": rsi, "mfi": mfi,
+                "supply": supply_tag, "s_score": s_score, "e_status": e_status, 
+                "drop": drop_rate, "broker_target": broker_target, "broker_opinion": broker_opinion,
+                "broker_upside": broker_upside, "broker_bonus": broker_bonus,
+                "df": df, "t_obj": t_obj
+            })
+            time.sleep(0.01)
+        except: continue
 
-            # 등급 판정
-            if total_score >= 45 and market_recovery: super_buys.append(t_info)
-            elif total_score >= 25: strong_buys.append(t_info)
-            elif rsi < 33: normal_buys.append(t_info)
+    hot_sectors = [k for k, v in sector_momentum.items() if v >= 2]
+    final_cards = []
+
+    for item in analysis_results:
+        theme_bonus = 15 if any(item['code'] in SECTORS[hs] for hs in hot_sectors) else 0
+        
+        sentiment, ai_score = "중립", 0
+        if item['rsi'] < 42 or item['s_score'] > 0 or theme_bonus > 0:
+            sentiment, ai_score = get_ai_analysis(item['name'], item['t_obj'])
+            time.sleep(0.4)
+
+        # 최종 점수 합산 (리포트 가점 포함)
+        total_score = item['s_score'] + ai_score + theme_bonus + item['broker_bonus'] + \
+                      (20 if item['rsi'] < 33 else 0) + (10 if item['drop'] > 35 else 0)
+        
+        atr = (item['df']['High'] - item['df']['Low']).rolling(14).mean().iloc[-1]
+        t1, t2, stop = item['price'] + (atr * 1.5), item['price'] + (atr * 3.0), item['price'] - (atr * 1.2)
+        
+        if total_score >= score_threshold or item['rsi'] < 30:
+            t_link = f"https://tossinvest.com/stocks/{item['code'].split('.')[0]}"
+            hot_tag = " [Hot테마]" if theme_bonus > 0 else ""
             
-            time.sleep(0.05)
-        except Exception as e:
-            continue
+            # 리포트 요약 텍스트
+            broker_info = f"{int(item['broker_target']):,}원({item['broker_upside']:.1f}%)" if item['broker_target'] > 0 else "정보없음"
+            
+            card = (f"🔥 **{item['name']}**{hot_tag} (점수:{total_score})\n"
+                    f"📍 Buy: {int(item['price']):,}원 (RSI:{item['rsi']:.1f})\n"
+                    f"🎯 Target: {int(t1):,} / {int(t2):,}원\n"
+                    f"🛑 Stop: {int(stop):,}원\n"
+                    f"📊 뉴스:{sentiment} | 수급:{item['supply']}\n"
+                    f"🏛 리포트:{item['broker_opinion']} | 목표:{broker_info}\n"
+                    f"🔗 [주문하기]({t_link})")
+            final_cards.append((total_score, card))
 
-    # 6. 분할 전송 리포트
-    header = f"🇰🇷 *KOREA STOCK QUANT AI*\n📅 {now.strftime('%m-%d %H:%M')}\n━━━━━━━━━━━━━━"
-    def send(msg): requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown", "disable_web_page_preview": True})
-
-    send(header)
+    final_cards.sort(key=lambda x: x[0], reverse=True)
     
-    if super_buys: 
-        send("🎯 **[SUPER BUY]**\n\n" + "\n\n".join(super_buys[:5]))
+    header = f"🇰🇷 *KOREA STOCK QUANT PRO*\n📅 {now.strftime('%m-%d %H:%M')} | {risk_mode}\n"
+    if hot_sectors: header += f"🚩 주도섹터: {', '.join(hot_sectors)}\n"
+    header += f"📈 어제 시장변동: {y_perf:+.2f}%\n━━━━━━━━━━━━━━\n\n"
     
-    if strong_buys:
-        for i in range(0, len(strong_buys), 5):
-            send("💎 **[STRONG BUY]**\n\n" + "\n\n".join(strong_buys[i:i+5]))
-            time.sleep(1) # 전송 안정성
-            
-    if normal_buys:
-        for i in range(0, len(normal_buys), 5):
-            send("🔍 **[NORMAL BUY]**\n\n" + "\n\n".join(normal_buys[i:i+5]))
-            time.sleep(1)
+    body = "\n\n".join([c[1] for c in final_cards[:15]])
+    full_message = header + body
+
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                  json={"chat_id": CHAT_ID, "text": full_message, "parse_mode": "Markdown", "disable_web_page_preview": True})
 
 if __name__ == "__main__":
-    run_analysis_kr()
+    run_full_pro_system()
+
 
