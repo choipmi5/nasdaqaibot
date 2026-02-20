@@ -3,14 +3,23 @@ import yfinance as yf
 import pandas as pd
 import requests
 import json
+import time
 from datetime import datetime
 import pytz
+import google.generativeai as genai
 
-# 1. 환경 설정
+# ==========================================
+# 1. 환경 설정 및 종목 리스트
+# ==========================================
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('CHAT_ID')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
-# [기존 종목 리스트 100개 유지]
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+
+# 제공해주신 100개 종목 리스트
 KR_STOCKS = [
     ("삼성전자", "005930.KS"), ("SK하이닉스", "000660.KS"), ("LG엔솔", "373220.KS"), ("삼성바이오", "207940.KS"), ("현대차", "005380.KS"),
     ("기아", "000270.KS"), ("셀트리온", "068270.KS"), ("KB금융", "105560.KS"), ("POSCO홀딩스", "005490.KS"), ("NAVER", "035420.KS"),
@@ -34,10 +43,11 @@ KR_STOCKS = [
     ("바이오니아", "064550.KQ"), ("STX", "011810.KS"), ("한화오션", "042660.KS"), ("LS", "006260.KS"), ("LS ELECTRIC", "010120.KS")
 ]
 
-NAME_MAP = {ticker: name for name, ticker in KR_STOCKS}
-STOCKS_KR = [ticker for name, ticker in KR_STOCKS]
+# --- 유틸리티 함수 (미장 로직 동일 이식) ---
+def flatten_df(df):
+    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    return df
 
-# --- [지표 함수 영역] ---
 def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
@@ -55,115 +65,117 @@ def calculate_macd(series):
     exp1 = series.ewm(span=12, adjust=False).mean()
     exp2 = series.ewm(span=26, adjust=False).mean()
     macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
-    return macd, signal
+    return macd, macd.ewm(span=9, adjust=False).mean()
 
-# --- [시장 지수 체크 및 블랙리스트 최적화] ---
-def get_optimized_stocks(log_file, blacklist_file, original_tickers):
-    market_recovery = False
+def get_comprehensive_data_kr(s_name, s_code, t_obj):
+    analysis = {"sentiment": "중립", "earnings": "안정", "score": 0}
     try:
-        # 코스피 지수(KS11) 기준으로 시장 추세 판단
-        m_df = yf.download("^KS11", period="50d", progress=False)
-        if isinstance(m_df.columns, pd.MultiIndex): m_df.columns = m_df.columns.get_level_values(0)
-        market_recovery = m_df['Close'].iloc[-1] > m_df['Close'].rolling(20).mean().iloc[-1]
+        news = t_obj.news[:3]
+        if news and GEMINI_API_KEY:
+            titles = [n['title'] for n in news]
+            prompt = f"Analyze Korean stock '{s_name}' ({s_code}): {titles}. Respond ONLY with one word: Positive, Negative, or Neutral."
+            res = model.generate_content(prompt).text.strip().capitalize()
+            analysis["sentiment"] = "호재" if "Positive" in res else "악재" if "Negative" in res else "중립"
+            if analysis["sentiment"] == "호재": analysis["score"] += 20
     except: pass
-
-    if not os.path.exists(log_file): return original_tickers, market_recovery
     try:
-        df = pd.read_csv(log_file)
-        perf = df.groupby('종목')['목표가달성'].apply(lambda x: (x == 'YES').mean())
-        count = df.groupby('종목').size()
-        eval_names = count[count >= 10].index.tolist()
-        bad_names = [n for n in eval_names if perf[n] < 0.3]
-        if not market_recovery: # 하락장일 때만 회색지대(30~50%) 종목 격리
-            bad_names.extend([n for n in eval_names if 0.3 <= perf[n] < 0.5])
-        
-        with open(blacklist_file, 'w') as f: json.dump(list(set(bad_names)), f)
-        bad_tickers = [t for name, t in KR_STOCKS if name in bad_names]
-        return [t for t in original_tickers if t not in bad_tickers], market_recovery
-    except: return original_tickers, market_recovery
+        cal = t_obj.calendar
+        e_date = cal['Earnings Date'][0] if isinstance(cal, dict) else cal.iloc[0][0]
+        days = (pd.to_datetime(e_date).replace(tzinfo=None) - datetime.now().replace(tzinfo=None)).days
+        if 0 <= days <= 7: 
+            analysis["earnings"] = f"⚠️D-{days}"
+            analysis["score"] -= 40
+    except: pass
+    return analysis
 
-# --- [분석 실행 엔진] ---
-def run_analysis():
+# ==========================================
+# 2. 메인 분석 실행 (국장 전용)
+# ==========================================
+def run_analysis_kr():
+    print(f"🚀 KOREA Stock Analysis started... (Total: {len(KR_STOCKS)})")
     if not TELEGRAM_TOKEN or not CHAT_ID: return
-    kst = pytz.timezone('Asia/Seoul')
-    now = datetime.now(kst)
+    kst = pytz.timezone('Asia/Seoul'); now = datetime.now(kst)
+    
+    # 지수 상황 (코스피 기준)
+    market_df = flatten_df(yf.download("^KS11", period="5d", progress=False))
+    market_recovery = (market_df['Close'].iloc[-1] > market_df['Close'].iloc[-2]) if not market_df.empty else False
+    
+    review_reports, super_buys, strong_buys, normal_buys = [], [], [], []
+    total_analyzed, down_count = 0, 0
 
-    optimized_tickers, market_recovery = get_optimized_stocks('trade_log_kr.csv', 'blacklist_kr.json', STOCKS_KR)
-    review_reports, super_buys, strong_buys, normal_buys, trade_logs, total_analyzed, down_count, temp_data = [], [], [], [], [], 0, 0, []
-
-    # 1. 전수 조사 (시장 상황 파악)
-    for s in optimized_tickers:
+    for idx, (s_name, s_code) in enumerate(KR_STOCKS):
+        print(f"[{idx+1}/{len(KR_STOCKS)}] {s_name} ({s_code})", end='\r')
         try:
-            df = yf.download(s, period="50d", progress=False)
+            t_obj = yf.Ticker(s_code)
+            df = flatten_df(t_obj.history(period="60d"))
             if len(df) < 30: continue
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-            close = df['Close']
+            
+            recent = t_obj.history(period="1d", interval="1m")
+            curr_p = float(recent['Close'].iloc[-1]) if not recent.empty else float(df['Close'].iloc[-1])
             total_analyzed += 1
-            if float(close.iloc[-1]) < float(close.rolling(20).mean().iloc[-1]): down_count += 1
-            temp_data.append((s, df))
-        except: continue
-
-    # 2. 국장 특화 가변 타겟 (안정형)
-    ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
-    if ratio < 0.3: t1, t2, mode_str = 1.015, 1.030, "🚀 불장(1.5/3.0%)"
-    elif ratio < 0.6: t1, t2, mode_str = 1.010, 1.020, "📈 보통(1.0/2.0%)"
-    else: t1, t2, mode_str = 1.005, 1.008, "⚠️ 하락(0.5/0.8%)"
-
-    # 3. 정밀 필터링 및 복기
-    for s, df in temp_data:
-        try:
-            close = df['Close']
-            curr_p, prev_p, s_name = float(close.iloc[-1]), float(close.iloc[-2]), NAME_MAP.get(s, s)
-            high_p, vol = float(df['High'].iloc[-1]), df['Volume']
             
-            # [기능 1] 전일 복기 (분할 익절 반영)
-            if calculate_rsi(close).iloc[-2] < 35:
-                hit1, hit2 = high_p >= prev_p * t1, high_p >= prev_p * t2
-                status = "🎯" if hit2 else ("🌗" if hit1 else "⏳")
-                review_reports.append(f"{s_name}:{status}")
-                trade_logs.append({"날짜": now.strftime('%Y-%m-%d'), "종목": s_name, "목표가달성": "YES" if hit2 else "NO"})
+            # [복기 로직] 어제 RSI 36 미만 -> 오늘 2% 수익 도달 여부
+            rsi_series = calculate_rsi(df['Close'])
+            if len(rsi_series) > 1 and rsi_series.iloc[-2] < 36:
+                hit = float(df['High'].iloc[-1]) >= float(df['Close'].iloc[-2]) * 1.02
+                review_reports.append(f"{s_name}:{'🎯' if hit else '⏳'}")
 
-            # [기능 2] 4중 퀀트 + 3중 정밀 필터
-            rsi, mfi = float(calculate_rsi(close).iloc[-1]), float(calculate_mfi(df).iloc[-1])
-            std = close.rolling(20).std()
-            lower_b = float((close.rolling(20).mean() - (std * 2)).iloc[-1])
-            macd, signal = calculate_macd(close)
+            # 기술 지표
+            ma20 = float(df['Close'].rolling(20).mean().iloc[-1])
+            if curr_p < ma20: down_count += 1
+            mfi = float(calculate_mfi(df).iloc[-1])
+            macd, signal = calculate_macd(df['Close'])
             
-            avg_vol = vol.rolling(5).mean().iloc[-1]
-            is_vol_spike = vol.iloc[-1] > avg_vol * 1.2 # [신규] 거래량 20% 폭발 확인
-            is_oversold = rsi < 32 or curr_p <= lower_b
-            is_money_in = mfi < 35
+            is_oversold = rsi_series.iloc[-1] < 36 or curr_p <= (ma20 - (df['Close'].rolling(20).std().iloc[-1] * 2))
             is_turning = float(macd.iloc[-1]) > float(signal.iloc[-1])
+            is_vol_spike = float(df['Volume'].iloc[-1]) > float(df['Volume'].rolling(5).mean().iloc[-1]) * 1.2
             
-            # [기능 3] 손절가 및 목표가 세분화
-            stop_loss = int(curr_p * 0.98) # 국장은 -2% 손절 권장
-            t_info = f"{int(curr_p * t1):,} / {int(curr_p * t2):,}\n(손절: {stop_loss:,})"
+            extra = get_comprehensive_data_kr(s_name, s_code, t_obj)
+            total_score = extra['score'] + (20 if is_oversold else 0) + (10 if is_turning else 0) + (10 if is_vol_spike else 0)
+            
+            # ATR 기반 국장 최적화 목표가 (1.2배 / 2.5배)
+            atr = (df['High'] - df['Low']).rolling(14).mean().iloc[-1]
+            t1_p, t2_p, stop_p = curr_p + (atr * 1.2), curr_p + (atr * 2.5), curr_p - (atr * 1.0)
+            
+            toss_link = f"https://tossinvest.com/stocks/{s_code.split('.')[0]}"
+            t_info = (f"🇰🇷 **`{s_name}`** (점수:{total_score})\n📍 현재가: {int(curr_p):,}원 (RSI:{rsi_series.iloc[-1]:.1f})\n"
+                      f"🎯 목표가: {int(t1_p):,} / {int(t2_p):,}원\n🛑 손절가: {int(stop_p):,}원\n"
+                      f"📊 뉴스:{extra['sentiment']} | 실적:{extra['earnings']}\n"
+                      f"🔗 [토스에서 주문하기]({toss_link})")
 
-            # 판정 루직 (지수 추세 & 거래량 필수 체크)
-            if is_oversold and is_money_in and is_turning and is_vol_spike and market_recovery:
-                super_buys.append(f"🎯 *{s_name}*\n{t_info}")
-            elif is_oversold and is_money_in and (is_vol_spike or market_recovery):
-                strong_buys.append(f"💎 *{s_name}*\n{t_info}")
-            elif is_oversold:
-                normal_buys.append(f"📈 *{s_name}*\n{t_info}")
+            if "⚠️" in extra['earnings']: continue
+            
+            if is_oversold and mfi < 40 and is_turning and is_vol_spike and market_recovery and total_score > 30:
+                super_buys.append(t_info)
+            elif is_oversold and (mfi < 40 or is_turning) and (is_vol_spike or total_score > 20):
+                strong_buys.append(t_info)
+            elif is_oversold or total_score > 50:
+                normal_buys.append(t_info)
+            
+            time.sleep(0.4) # API 과부하 방지
         except: continue
 
-    # 4. 결과 저장 및 리포트 발송
-    if trade_logs: 
-        pd.DataFrame(trade_logs).to_csv('trade_log_kr.csv', mode='a', index=False, header=not os.path.exists('trade_log_kr.csv'), encoding='utf-8-sig')
+    # 메시지 리포트 작성
+    ratio = down_count / total_analyzed if total_analyzed > 0 else 0.5
+    mode_str = "🚀 강세장" if ratio < 0.3 else "📈 보통" if ratio < 0.6 else "⚠️ 약세장"
     
     report = [
-        f"🇰🇷 *KOREA PRO AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
-        f"📊 **[전일 복기]** (🎯:2차 🌗:1차 ⏳:대기)\n" + (", ".join(review_reports[:10]) if review_reports else "- 대상 없음"), "━━━━━━━━━━━━━━",
-        f"🎯 **[SUPER BUY]** (수급+시장완벽)\n" + ("\n".join(super_buys[:5]) if super_buys else "- 없음"),
-        f"\n💎 **[STRONG BUY]**\n" + ("\n".join(strong_buys[:10]) if strong_buys else "- 없음"),
-        f"\n🔍 **[NORMAL BUY]**\n" + ("\n".join(normal_buys[:15]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
-        f"✅ {total_analyzed}분석 (시장점수: {int((1-ratio)*100)}점)"
+        f"🇰🇷 *KOREA STOCK PRO AI*", f"📅 {now.strftime('%m-%d %H:%M')} | {mode_str}", "━━━━━━━━━━━━━━",
+        f"📊 **[전일 복기]**\n" + (", ".join(review_reports[:12]) if review_reports else "- 데이터 없음"), "━━━━━━━━━━━━━━",
+        f"🎯 **[SUPER BUY]**\n" + ("\n\n".join(super_buys[:5]) if super_buys else "- 없음"),
+        f"\n💎 **[STRONG BUY]**\n" + ("\n\n".join(strong_buys[:7]) if strong_buys else "- 없음"),
+        f"\n🔍 **[NORMAL BUY]**\n" + ("\n\n".join(normal_buys[:10]) if normal_buys else "- 없음"), "━━━━━━━━━━━━━━",
+        f"✅ {total_analyzed}개 국장 전수 분석 완료"
     ]
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": "\n".join(report), "parse_mode": "Markdown"})
+    
+    full_text = "\n".join(report)
+    # 메시지 길이 초과 시 분할 전송
+    for part in [full_text[i:i+4000] for i in range(0, len(full_text), 4000)]:
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
+                      json={"chat_id": CHAT_ID, "text": part, "parse_mode": "Markdown", "disable_web_page_preview": True})
 
 if __name__ == "__main__":
-    run_analysis()
+    run_analysis_kr()
+
 
 
