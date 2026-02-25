@@ -7,7 +7,7 @@ import json
 import time
 from datetime import datetime, timedelta
 import pytz
-import google.generativeai as genai
+from google import genai # [수정됨] 지원 종료된 generativeai 대신 최신 genai 사용
 import re
 import warnings
 import vectorbt as vbt # 전략 승률 백테스팅용
@@ -26,9 +26,11 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 TOTAL_CAPITAL = 100000.0  
 RISK_TOLERANCE_PER_TRADE = 0.01  # 1회 매수 시 총자본의 최대 1% 리스크만 노출 (켈리/리스크 패리티)
 
+# [수정됨] 새로운 Client 기반 API 초기화
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+else:
+    gemini_client = None
 
 # ==========================================
 # [2. 섹터 및 분석 대상 종목 유니버스]
@@ -143,7 +145,7 @@ def get_market_status():
         vix_data = yf.download("^VIX", period="1d", progress=False)
         vix = float(vix_data['Close'].iloc[-1])
         
-        # 나스닥 종합지수 추적 (유저 교정사항 엄격 반영)
+        # 나스닥 종합지수 추적
         ndx_data = yf.download("^IXIC", period="2d", progress=False)
         if len(ndx_data) >= 2:
             change = float(((ndx_data['Close'].iloc[-1] / ndx_data['Close'].iloc[-2]) - 1) * 100)
@@ -166,14 +168,23 @@ def get_target_price_fallback(ticker, curr_p, df_hist):
 def get_external_data(s, t_obj, curr_p, df_hist):
     data = {"sentiment": "중립", "earnings": "안정", "target": None, "upside": "N/A", "upside_tag": "", "score": 0}
     try:
+        # [수정됨] 새로운 gemini_client 규격에 맞춘 API 호출
         try:
             news = t_obj.news[:3]
-            if news and GEMINI_API_KEY:
+            if news and gemini_client:
                 titles = [n['title'] for n in news]
-                res = model.generate_content(f"Stock {s}: {titles}. Respond exactly one word: Positive, Negative, or Neutral.").text.strip()
+                prompt = f"Stock {s}: {titles}. Respond exactly one word: Positive, Negative, or Neutral."
+                
+                response = gemini_client.models.generate_content(
+                    model='gemini-2.5-flash', # 권장되는 최신 모델
+                    contents=prompt
+                )
+                res = response.text.strip()
+                
                 if "Positive" in res: data["sentiment"], data["score"] = "호재", data["score"] + 20
                 elif "Negative" in res: data["sentiment"] = "악재"
-        except: pass
+        except Exception as e: 
+            pass
         
         info = {}
         try: info = t_obj.info
@@ -187,7 +198,7 @@ def get_external_data(s, t_obj, curr_p, df_hist):
         if target and float(target) > 0:
             upside_val = ((target / curr_p) - 1) * 100
             data["upside"], data["upside_tag"] = f"{upside_val:.1f}", f"({source_label})"
-            # 20% 이상 괴리 시 15점 가점 (기존 요구사항 10점 -> 15점 복구/확대)
+            # 20% 이상 괴리 시 15점 가점
             if upside_val > 20: data["score"] += 15
         
         try:
@@ -371,6 +382,7 @@ def run_full_scan():
 
 if __name__ == "__main__":
     run_full_scan()
+
 
 
 
