@@ -17,13 +17,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.10' # 3.9에서 3.10으로 업그레이드!
+          python-version: '3.11' # [수정됨] 3.10 지원 종료 경고 해결을 위해 3.11로 업그레이드
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # 최신 버전 호환성을 위해 라이브러리 설치 최적화
-          pip install yfinance pandas requests pytz google-generativeai
+          # [수정됨] vectorbt, numpy 추가 및 구형 google-generativeai를 최신 google-genai로 교체
+          pip install yfinance pandas numpy requests pytz google-genai vectorbt
 
       - name: Run AI Auto Trader
         env:
@@ -31,4 +31,3 @@ jobs:
           CHAT_ID: ${{ secrets.CHAT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python main.py
-
